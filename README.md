@@ -1,6 +1,6 @@
 # CleanPassword
 
-A password manager whose vault lives in **an S3 bucket of your own**, end-to-end encrypted, with a **Chrome extension** and an **iPhone app** (with AutoFill). Like CleanNotes, there is no server: each device talks to S3 directly with an IAM key you create.
+A password manager that looks and behaves like Apple's Passwords app, whose vault lives in **an S3 bucket of your own**, end-to-end encrypted, with a **Chrome extension** and an **iPhone app** (with AutoFill). Like its sibling [CleanNotes](../CleanNotes), there is no server: each device talks to S3 directly with an IAM key you create.
 
 - **Shared Rust core** (`core/`): the vault, its encryption, S3 sync, the password generator, website matching, TOTP codes, and imports. The Chrome extension runs it as WebAssembly (`wasm/`); the iPhone app and its AutoFill extension call it through UniFFI (`ffi/`). Both read and write the same vault.
 - **Chrome extension** (`extension/`): popup, inline autofill menu, save/update prompts, generator, Bitwarden import.
@@ -43,7 +43,13 @@ A password manager whose vault lives in **an S3 bucket of your own**, end-to-end
 
 ### iPhone app
 
-- The vault list with search and folders, item details with copy, reveal, live TOTP codes and history, the editor, the generator, settings, import and export.
+- **The Passwords screen, as in Apple's Passwords app:** tiles for **All**, **Codes**, **Security** and **Deleted** with their counts, your folders below them, and search across everything. The "…" menu has Settings, the generator and Lock Now; the bottom toolbar shows the sync status and New Password.
+  - **All and folders** list items by name in letter sections. Touch and hold an item to copy its user name, password or code, or to delete it.
+  - **Codes** shows each item's current verification code with a countdown ring; tap one to copy it.
+  - **Security** lists reused passwords, then weak ones.
+  - **Deleted** keeps items 30 days; swipe to recover or delete for good.
+- **An item** shows its icon, name and modified date on top, then user name, password (dots until tapped), verification code, websites, fields, notes and earlier passwords, each with a copy button. Edit opens the editor, with the generator and a strength meter.
+- The Chrome popup has the same tiles, under the logins for the current site.
 - **Face ID unlock.** It's optional, uses a keychain item readable only after biometric authentication, and is forgotten when the enrolled faces change.
 - **Auto-lock** after time in the background.
 - **The AutoFill extension** works from the keyboard, the QuickType suggestions and Safari. It unlocks with Face ID or the master password. The suggestions above the keyboard register only user names and websites with iOS, never passwords.

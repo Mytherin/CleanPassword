@@ -66,5 +66,5 @@ jobs:
         run: |
           DEST="platform=iOS Simulator,name=$(xcrun simctl list devices available | grep -m1 -o 'iPhone [0-9][0-9]*[^(]*' | sed 's/ *$//')"
           echo "Destination: $DEST"
-          .github/annotate.sh xcodebuild test -quiet -project CleanPassword.xcodeproj -scheme CleanPassword -destination "$DEST" \
+          ../.github/annotate.sh xcodebuild test -quiet -project CleanPassword.xcodeproj -scheme CleanPassword -destination "$DEST" \
             CODE_SIGNING_ALLOWED=NO

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Connecting to an S3 bucket: a new vault, or the one already there.
 struct SetupView: View {
-    @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var store: VaultStore
     @State private var bucket = ""
     @State private var region = "us-east-1"
     @State private var prefix = "CleanPassword"
@@ -72,17 +72,17 @@ struct SetupView: View {
         let settings = S3Settings(bucket: bucket.trimmingCharacters(in: .whitespaces), region: region.trimmingCharacters(in: .whitespaces), prefix: prefix.trimmingCharacters(in: .whitespaces), endpoint: endpoint.isEmpty ? nil : endpoint)
         let keys = AwsKeys(accessKeyId: keyId.trimmingCharacters(in: .whitespaces), secretAccessKey: secret.trimmingCharacters(in: .whitespaces), sessionToken: nil)
         do {
-            let remote = try await model.probe(settings: settings, keys: keys)
+            let remote = try await store.probe(settings: settings, keys: keys)
             found = Found(settings: settings, keys: keys, remote: remote)
         } catch {
-            self.error = describe(error)
+            self.error = message(error)
         }
     }
 }
 
 /// A new master password, or the existing vault's.
 struct MasterPasswordView: View {
-    @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var store: VaultStore
     let found: SetupView.Found
     @State private var password = ""
     @State private var again = ""
@@ -127,13 +127,13 @@ struct MasterPasswordView: View {
         defer { busy = false }
         do {
             if let remote = found.remote {
-                try await model.join(settings: found.settings, keys: found.keys, remote: remote, password: password)
+                try await store.join(settings: found.settings, keys: found.keys, remote: remote, password: password)
             } else {
                 guard password == again else { error = "The passwords don't match."; return }
-                try await model.create(settings: found.settings, keys: found.keys, password: password)
+                try await store.create(settings: found.settings, keys: found.keys, password: password)
             }
         } catch {
-            self.error = describe(error)
+            self.error = message(error)
         }
     }
 }

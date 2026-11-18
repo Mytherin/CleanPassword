@@ -214,14 +214,30 @@ async function home(): Promise<void> {
       nodes.push(h("div", { class: "section" }, `For ${tab.host}`));
       for (const m of tab.matches) nodes.push(matchRow(m));
     }
-    const favorites = items.filter((i) => i.favorite);
-    if (favorites.length && !query) {
-      nodes.push(h("div", { class: "section" }, "Favorites"));
-      for (const i of favorites) nodes.push(itemRow(i));
+    if (query) {
+      nodes.push(h("div", { class: "section" }, `${items.length} found`));
+      for (const i of items) nodes.push(itemRow(i));
+      return list.replaceChildren(...nodes);
     }
-    nodes.push(h("div", { class: "section" }, query ? `${items.length} found` : `All items (${items.length})`));
-    for (const i of items) nodes.push(itemRow(i));
-    if (!items.length && !query) nodes.push(h("p", { class: "muted", style: "padding: 0 12px" }, "No items yet. Add one with +, or import from Bitwarden in Settings."));
+    // The tiles of Apple's Passwords app, then the folders.
+    const [findings, trash] = await Promise.all([ask<unknown[]>("audit"), ask<Item[]>("trash")]);
+    const codes = items.filter((i) => i.totp);
+    nodes.push(h("div", { class: "tiles" },
+      tile("All", "🔑", "#0a84ff", items.length, () => void category("All", items)),
+      tile("Codes", "⏱", "#5e5ce6", codes.length, () => void codesView(codes)),
+      tile("Security", "⚠", "#ff3b30", findings.length, () => void audit(home)),
+      tile("Deleted", "🗑", "#ff9500", trash.length, () => void trashView(home)),
+    ));
+    const folders = [...new Set(items.map((i) => i.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    if (folders.length) {
+      nodes.push(h("div", { class: "section" }, "Folders"));
+      for (const f of folders) {
+        const inside = items.filter((i) => i.folder === f);
+        nodes.push(h("button", { class: "row", onclick: () => void category(f, inside) },
+          h("span", { class: "text" }, h("div", { class: "title" }, `📁 ${f}`)), h("span", { class: "muted" }, String(inside.length))));
+      }
+    }
+    if (!items.length) nodes.push(h("p", { class: "muted", style: "padding: 0 12px" }, "No passwords yet. Add one with +, or import from Bitwarden in Settings."));
     list.replaceChildren(...nodes);
   };
   search.addEventListener("input", () => void draw());
@@ -515,7 +531,6 @@ async function settingsView(): Promise<void> {
     h("div", { class: "section" }, "Security"),
     h("div", { class: "form" }, h("label", {}, "Lock automatically", lockMin), toggle("Lock when the computer locks", "lockOnIdle")),
     h("div", { class: "card" },
-      h("button", { class: "row", onclick: () => void audit() }, h("span", { class: "text" }, h("div", { class: "title" }, "Security recommendations"), h("div", { class: "sub" }, "Weak and reused passwords"))),
       h("button", { class: "row", onclick: () => changePassword() }, h("span", { class: "text" }, h("div", { class: "title" }, "Change master password"))),
     ),
     h("div", { class: "section" }, "Autofill"),
@@ -525,7 +540,6 @@ async function settingsView(): Promise<void> {
     h("div", { class: "card" },
       h("button", { class: "row", onclick: () => importView() }, h("span", { class: "text" }, h("div", { class: "title" }, "Import"), h("div", { class: "sub" }, "From Bitwarden (JSON or CSV), Chrome, Safari, Firefox, 1Password, LastPass"))),
       h("button", { class: "row", onclick: () => void exportVault() }, h("span", { class: "text" }, h("div", { class: "title" }, "Export"), h("div", { class: "sub" }, "As unencrypted Bitwarden JSON"))),
-      h("button", { class: "row", onclick: () => void trashView() }, h("span", { class: "text" }, h("div", { class: "title" }, "Recently deleted"))),
     ),
     h("div", { class: "actions", style: "margin-top: 12px" }, h("button", { class: "btn danger", onclick: () => void forget() }, "Remove vault from this browser")),
   );
@@ -573,25 +587,80 @@ function changePassword(): void {
   screen("Master password", back(() => void settingsView()), [], form);
 }
 
-async function audit(): Promise<void> {
+// ---- The tiles: All (or a folder), Codes, Security, Deleted -------------------------
+
+function tile(title: string, icon: string, color: string, count: number, open: () => void): HTMLElement {
+  return h("button", { class: "tile", onclick: open },
+    h("span", { class: "tile-icon", style: `background:${color}`, "aria-hidden": "true" }, icon),
+    h("span", { class: "tile-count" }, String(count)),
+    h("span", { class: "tile-title" }, title));
+}
+
+/// Items by name, in letter sections (All, or a folder).
+function category(title: string, items: Item[]): void {
+  const nodes: Node[] = [];
+  let letter = "";
+  for (const i of items) {
+    const first = i.name.trim().charAt(0).toUpperCase();
+    const l = /\p{L}/u.test(first) ? first : "#";
+    if (l !== letter) {
+      letter = l;
+      nodes.push(h("div", { class: "section" }, l));
+    }
+    nodes.push(itemRow(i));
+  }
+  screen(title, back(() => void home()), [], ...(nodes.length ? nodes : [h("p", { class: "muted", style: "padding: 12px" }, "No passwords.")]));
+}
+
+/// Items with one-time codes, each with its current code: click to copy.
+async function codesView(items: Item[]): Promise<void> {
+  const rows = items.map((i) => {
+    const code = h("span", { class: "secret totp" });
+    const left = h("span", { class: "small muted" });
+    let current = "";
+    const row = h("button", { class: "row", onclick: async () => {
+      await copy(current);
+      left.textContent = " Copied";
+    } }, monogram(i.name), h("span", { class: "text" }, h("div", { class: "title" }, i.name), h("div", { class: "sub" }, i.username)), code, left);
+    return { i, code, left, row, set: (c: string) => (current = c) };
+  });
+  const tick = async () => {
+    for (const r of rows) {
+      try {
+        const c = await ask<{ code: string; remaining: number }>("totp", { id: r.i.id });
+        r.set(c.code);
+        r.code.textContent = c.code.length === 6 ? `${c.code.slice(0, 3)} ${c.code.slice(3)}` : c.code;
+        if (r.left.textContent !== " Copied") r.left.textContent = ` ${c.remaining}s`;
+      } catch {
+        r.code.textContent = "Invalid";
+      }
+    }
+  };
+  await tick();
+  const timer = setInterval(() => void tick(), 1000);
+  screen("Codes", back(() => (clearInterval(timer), void home())), [],
+    ...(rows.length ? rows.map((r) => r.row) : [h("p", { class: "muted", style: "padding: 12px" }, "No verification codes. Add a setup key to a password to keep its codes here.")]));
+}
+
+async function audit(from: () => unknown = settingsView): Promise<void> {
   const entries = await ask<{ id: string; name: string; weak: boolean; reused: number }[]>("audit");
-  screen("Security recommendations", back(() => void settingsView()), [],
+  screen("Security", back(() => void from()), [],
     entries.length
       ? h("div", {}, ...entries.map((e) => h("button", { class: "row", onclick: () => void detail(e.id) }, monogram(e.name),
         h("span", { class: "text" }, h("div", { class: "title" }, e.name), h("div", { class: "sub" }, [e.reused ? `Reused on ${e.reused} other item(s)` : "", e.weak ? "Weak" : ""].filter(Boolean).join(" · "))))))
       : h("p", { class: "muted", style: "padding: 12px" }, "No weak or reused passwords. 👍"));
 }
 
-async function trashView(): Promise<void> {
+async function trashView(from: () => unknown = settingsView): Promise<void> {
   const items = await ask<Item[]>("trash");
-  screen("Recently deleted", back(() => void settingsView()), [],
+  screen("Deleted", back(() => void from()), [],
     h("p", { class: "small muted", style: "padding: 0 12px" }, "Items are deleted for good after 30 days."),
     ...items.map((i) => h("div", { class: "row" }, monogram(i.name), h("span", { class: "text" }, h("div", { class: "title" }, i.name), h("div", { class: "sub" }, i.username)),
-      h("button", { class: "btn small", onclick: async () => (await ask("restore", { id: i.id }), trashView()) }, "Recover"),
+      h("button", { class: "btn small", onclick: async () => (await ask("restore", { id: i.id }), trashView(from)) }, "Recover"),
       h("button", { class: "btn small danger", onclick: async () => {
         if (confirm(`Delete “${i.name}” for good, on every device?`)) {
           await ask("purge", { id: i.id });
-          await trashView();
+          await trashView(from);
         }
       } }, "Delete"))));
 }

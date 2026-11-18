@@ -67,6 +67,13 @@ final class Core: @unchecked Sendable {
         }
     }
 
+    /// Runs a non-throwing body on the core's queue.
+    func detachedValue<T>(_ body: @escaping () -> T) async -> T {
+        await withCheckedContinuation { cont in
+            queue.async { cont.resume(returning: body()) }
+        }
+    }
+
     func open(_ s: VaultSession) async {
         await withCheckedContinuation { cont in
             queue.async {
@@ -92,7 +99,7 @@ extension SuggestedLogin: Identifiable {}
 extension AuditFinding: Identifiable {}
 
 /// A message to show for an error from the core (or anything else).
-func describe(_ error: Error) -> String {
+func message(_ error: Error) -> String {
     switch error as? CoreError {
     case .WrongPassword: return "That's not the master password."
     case .DifferentVault: return "That S3 folder holds a different vault."

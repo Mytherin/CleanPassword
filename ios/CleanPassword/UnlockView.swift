@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct UnlockView: View {
-    @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var store: VaultStore
     let info: LockedVault
     @State private var password = ""
     @State private var busy = false
@@ -32,9 +32,9 @@ struct UnlockView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .disabled(busy || password.isEmpty)
-            if model.biometricsOn {
+            if store.biometricsOn {
                 Button {
-                    Task { _ = await model.unlockWithBiometrics() }
+                    Task { _ = await store.unlockWithBiometrics() }
                 } label: {
                     Label("Use \(BiometricKey.biometryName)", systemImage: "faceid")
                 }
@@ -45,11 +45,11 @@ struct UnlockView: View {
         }
         .padding(24)
         .task {
-            if model.biometricsOn, await model.unlockWithBiometrics() { return }
+            if store.biometricsOn, await store.unlockWithBiometrics() { return }
             focused = true
         }
         .confirmationDialog("Remove the vault from this iPhone?", isPresented: $confirmForget, titleVisibility: .visible) {
-            Button("Remove", role: .destructive) { model.forget() }
+            Button("Remove", role: .destructive) { store.forget() }
         } message: {
             Text("It stays in S3. Changes made here that haven't synced yet are lost.")
         }
@@ -60,10 +60,10 @@ struct UnlockView: View {
         error = nil
         defer { busy = false }
         do {
-            try await model.unlock(password: password)
+            try await store.unlock(password: password)
             password = ""
         } catch {
-            self.error = describe(error)
+            self.error = message(error)
         }
     }
 }

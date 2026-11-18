@@ -85,7 +85,7 @@ final class ExtensionModel: ObservableObject {
             let s = try await Task.detached { try VaultSession.unlock(saved: saved, password: password) }.value
             opened(s)
         } catch {
-            self.error = describe(error)
+            self.error = message(error)
         }
     }
 

@@ -2,45 +2,59 @@ import SwiftUI
 
 @main
 struct CleanPasswordApp: App {
-    @StateObject private var model = AppModel()
-    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var store = VaultStore()
+    @Environment(\.scenePhase) private var phase
 
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environmentObject(model)
+                .environmentObject(store)
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: phase) { _, phase in
             switch phase {
-            case .background: model.enteredBackground()
-            case .active: model.enteredForeground()
+            case .background: store.enteredBackground()
+            case .active: store.enteredForeground()
             default: break
             }
         }
     }
 }
 
+/// Setting up, unlocking, or the navigation stack from the Passwords
+/// screen; the vault is hidden behind a lock in the app switcher.
 struct RootView: View {
-    @EnvironmentObject var model: AppModel
-    @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var store: VaultStore
+    @Environment(\.scenePhase) private var phase
+    @State private var path: [Route] = []
 
     var body: some View {
         ZStack {
-            switch model.phase {
+            switch store.phase {
             case .setup: SetupView()
             case .locked(let info): UnlockView(info: info)
-            case .unlocked: VaultListView()
+            case .unlocked:
+                NavigationStack(path: $path) {
+                    PasswordsView(path: $path)
+                        .navigationDestination(for: Route.self) { route in
+                            switch route {
+                            case .list(let c): ItemListView(category: c)
+                            case .item(let id): ItemDetailView(id: id)
+                            }
+                        }
+                }
             }
-            // Hide the vault in the app switcher's snapshot.
-            if scenePhase != .active && model.phase == .unlocked {
+            if phase != .active && store.phase == .unlocked {
                 Color(.systemBackground).ignoresSafeArea()
                 Image(systemName: "lock.fill").font(.largeTitle).foregroundStyle(.secondary)
             }
         }
-        .alert("CleanPassword", isPresented: Binding(get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })) {
-            Button("OK") { model.notice = nil }
+        .onChange(of: store.phase) { _, p in
+            if p != .unlocked { path = [] }
+        }
+        .alert("CleanPassword", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
+            Button("OK") { store.notice = nil }
         } message: {
-            Text(model.notice ?? "")
+            Text(store.notice ?? "")
         }
     }
 }

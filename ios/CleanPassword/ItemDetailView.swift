@@ -1,130 +1,170 @@
 import SwiftUI
 
+/// A password, as in Apple's Passwords app: its icon, name and when it was
+/// modified on top; then user name, password (dots until tapped) and
+/// verification code, each copied from its menu or button; websites,
+/// fields, notes and earlier passwords below. Edit opens the editor.
 struct ItemDetailView: View {
-    @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var store: VaultStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     let id: String
+
     @State private var revealed = false
     @State private var editing = false
     @State private var confirmDelete = false
+    @State private var copied: String?
 
-    private var item: VaultItem? { model.items.first { $0.id == id } }
+    private var item: VaultItem? { store.items.first { $0.id == id } }
 
     var body: some View {
         if let item {
-            List {
-                let f = item.fields
-                if f.kind == .login {
-                    Section {
-                        if !f.username.isEmpty { copyRow("User name", f.username) }
-                        if !f.password.isEmpty {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text("Password").font(.caption).foregroundStyle(.secondary)
-                                    Text(revealed ? f.password : String(repeating: "•", count: 10)).font(.body.monospaced())
-                                }
-                                Spacer()
-                                Button { revealed.toggle() } label: { Image(systemName: revealed ? "eye.slash" : "eye") }.buttonStyle(.borderless)
-                                Button { copySecret(f.password) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
-                            }
-                        }
-                        if !f.totp.isEmpty { TotpRow(id: item.id) }
-                    }
-                    if !f.websites.isEmpty {
-                        Section("Websites") {
-                            ForEach(f.websites, id: \.uri) { w in
-                                Button(w.uri) {
-                                    if let url = URL(string: w.uri.contains("://") ? w.uri : "https://\(w.uri)") { openURL(url) }
-                                }
-                            }
-                        }
-                    }
-                }
-                if !f.fields.isEmpty {
-                    Section("Fields") {
-                        ForEach(Array(f.fields.enumerated()), id: \.offset) { _, c in
-                            copyRow(c.name, c.hidden && !revealed ? String(repeating: "•", count: 8) : c.value, copy: c.value)
-                        }
-                    }
-                }
-                if !f.notes.isEmpty {
-                    Section("Notes") { Text(f.notes).textSelection(.enabled) }
-                }
-                if !item.history.isEmpty {
-                    Section("Password History") {
-                        DisclosureGroup("\(item.history.count) earlier password(s)") {
-                            ForEach(Array(item.history.enumerated()), id: \.offset) { _, h in
-                                copyRow(Date(timeIntervalSince1970: TimeInterval(h.retired)).formatted(), h.password)
-                            }
-                        }
-                    }
-                }
-                Section {
-                    Text("Modified \(Date(timeIntervalSince1970: TimeInterval(item.modified)).formatted())").font(.footnote).foregroundStyle(.secondary)
-                    Button("Delete", role: .destructive) { confirmDelete = true }
-                }
-            }
-            .navigationTitle(f.name)
-            .toolbar {
-                Button("Edit") { editing = true }
-            }
-            .sheet(isPresented: $editing) {
-                NavigationStack { ItemEditView(item: item) }
-            }
-            .confirmationDialog("Move “\(f.name)” to Recently Deleted?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button("Delete", role: .destructive) {
-                    Task {
-                        try? await model.change { try $0.delete(id: item.id) }
-                        dismiss()
-                    }
-                }
-            }
+            content(item)
         } else {
-            ContentUnavailableView("Item Not Found", systemImage: "questionmark")
+            ContentUnavailableView("Password Not Found", systemImage: "key")
         }
     }
 
-    private var f: ItemFields { item?.fields ?? .empty() }
+    private func content(_ item: VaultItem) -> some View {
+        let f = item.fields
+        return List {
+            Section {
+                VStack(spacing: 8) {
+                    Monogram(name: f.name, size: 64)
+                    Text(f.name).font(.title2.bold()).multilineTextAlignment(.center)
+                    Text("Modified \(Date(timeIntervalSince1970: TimeInterval(item.modified)).formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .listRowBackground(Color.clear)
+            }
+            if f.kind == .login {
+                Section {
+                    if !f.username.isEmpty { copyRow("User Name", f.username, key: "user") }
+                    if !f.password.isEmpty { passwordRow(f.password) }
+                    if !f.totp.isEmpty { TotpRow(secret: f.totp) }
+                }
+                if !f.websites.isEmpty {
+                    Section("Websites") {
+                        ForEach(f.websites, id: \.uri) { w in
+                            Button(w.uri) {
+                                if let url = URL(string: w.uri.contains("://") ? w.uri : "https://\(w.uri)") { openURL(url) }
+                            }
+                        }
+                    }
+                }
+            }
+            if !f.fields.isEmpty {
+                Section("Fields") {
+                    ForEach(Array(f.fields.enumerated()), id: \.offset) { n, c in
+                        copyRow(c.name, c.hidden && !revealed ? String(repeating: "•", count: 8) : c.value, key: "field\(n)", copy: c.value)
+                    }
+                }
+            }
+            if !f.notes.isEmpty {
+                Section("Notes") { Text(f.notes).textSelection(.enabled) }
+            }
+            if !item.history.isEmpty {
+                Section {
+                    DisclosureGroup("Earlier Passwords (\(item.history.count))") {
+                        ForEach(Array(item.history.enumerated()), id: \.offset) { n, h in
+                            copyRow(Date(timeIntervalSince1970: TimeInterval(h.retired)).formatted(date: .abbreviated, time: .omitted), h.password, key: "old\(n)", mono: true)
+                        }
+                    }
+                }
+            }
+            Section {
+                Button(f.kind == .note ? "Delete Note" : "Delete Password", role: .destructive) { confirmDelete = true }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            Button("Edit") { editing = true }
+        }
+        .sheet(isPresented: $editing) {
+            NavigationStack { ItemEditView(item: item) }
+        }
+        .confirmationDialog("Move “\(f.name)” to Deleted?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                Task {
+                    try? await store.change { try $0.delete(id: item.id) }
+                    dismiss()
+                }
+            }
+        } message: {
+            Text("You can recover it from Deleted for 30 days.")
+        }
+    }
 
-    private func copyRow(_ label: String, _ value: String, copy: String? = nil) -> some View {
+    private func passwordRow(_ password: String) -> some View {
+        Button {
+            revealed.toggle()
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Password").font(.caption).foregroundStyle(.secondary)
+                    Text(revealed ? password : String(repeating: "•", count: 12))
+                        .font(.body.monospaced()).foregroundStyle(.primary)
+                }
+                Spacer()
+                copyButton(password, key: "password")
+            }
+        }
+        .contextMenu {
+            Button { copySecret(password) } label: { Label("Copy Password", systemImage: "doc.on.doc") }
+            Button { revealed.toggle() } label: { Label(revealed ? "Hide Password" : "Show Password", systemImage: revealed ? "eye.slash" : "eye") }
+        }
+    }
+
+    private func copyRow(_ label: String, _ value: String, key: String, copy: String? = nil, mono: Bool = false) -> some View {
         HStack {
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(label).font(.caption).foregroundStyle(.secondary)
-                Text(value).textSelection(.enabled)
+                Text(value).font(mono ? .body.monospaced() : .body).textSelection(.enabled)
             }
             Spacer()
-            Button { copySecret(copy ?? value) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+            copyButton(copy ?? value, key: key)
         }
+        .contextMenu {
+            Button { copySecret(copy ?? value) } label: { Label("Copy \(label)", systemImage: "doc.on.doc") }
+        }
+    }
+
+    private func copyButton(_ value: String, key: String) -> some View {
+        Button {
+            copySecret(value)
+            copied = key
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                if copied == key { copied = nil }
+            }
+        } label: {
+            Image(systemName: copied == key ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(.borderless)
     }
 }
 
-/// The current one-time code, ticking.
+/// The current verification code, ticking down.
 struct TotpRow: View {
-    let id: String
-    @State private var code: OneTimeCode?
+    let secret: String
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let code = try? oneTimeCode(secret: secret)
             HStack {
-                VStack(alignment: .leading) {
-                    Text("One-time code").font(.caption).foregroundStyle(.secondary)
-                    Text(formatted).font(.title3.monospaced())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Verification Code").font(.caption).foregroundStyle(.secondary)
+                    Text(code.map { $0.code.count == 6 ? "\($0.code.prefix(3)) \($0.code.suffix(3))" : $0.code } ?? "Invalid setup key")
+                        .font(.title3.monospacedDigit())
                 }
                 Spacer()
-                if let c = code {
-                    Text("\(c.remaining)s").font(.caption.monospacedDigit()).foregroundStyle(c.remaining <= 5 ? .red : .secondary)
+                if let code {
+                    CountdownRing(remaining: code.remaining, period: code.period)
+                    Button { copySecret(code.code) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
                 }
-                Button { if let c = code { copySecret(c.code) } } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
-            }
-            .task(id: ctx.date) {
-                code = try? await Core.shared.run { $0.totp(id: id) }
             }
         }
-    }
-
-    private var formatted: String {
-        guard let c = code?.code else { return "——" }
-        return c.count == 6 ? "\(c.prefix(3)) \(c.suffix(3))" : c
     }
 }

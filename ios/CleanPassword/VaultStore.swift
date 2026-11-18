@@ -3,7 +3,7 @@ import SwiftUI
 /// The app's state: set up, locked or unlocked, the items, and syncing.
 /// Everything the vault does happens in the Rust core (`Core`).
 @MainActor
-final class AppModel: ObservableObject {
+final class VaultStore: ObservableObject {
     enum Phase: Equatable {
         case setup
         case locked(LockedVault)
@@ -12,6 +12,10 @@ final class AppModel: ObservableObject {
 
     @Published var phase: Phase = .setup
     @Published var items: [VaultItem] = []
+    /// Recently Deleted.
+    @Published var trash: [VaultItem] = []
+    /// Weak and reused passwords (the Security tile).
+    @Published var findings: [AuditFinding] = []
     @Published var syncing = false
     @Published var syncMessage: String?
     @Published var lastSync: Date?
@@ -97,7 +101,10 @@ final class AppModel: ObservableObject {
     // MARK: Items
 
     func reload() async {
-        items = (try? await Core.shared.run { $0.items() }) ?? []
+        let all = try? await Core.shared.run { s in (s.items(), s.trash(), s.audit()) }
+        items = all?.0 ?? []
+        trash = all?.1 ?? []
+        findings = all?.2 ?? []
         SuggestionStore.update(with: items)
     }
 
@@ -136,7 +143,7 @@ final class AppModel: ObservableObject {
                 }
                 await reload()
             } catch {
-                syncMessage = describe(error)
+                syncMessage = message(error)
             }
         }
     }
@@ -172,12 +179,5 @@ final class AppModel: ObservableObject {
             sync()
         }
         backgroundedAt = nil
-    }
-}
-
-extension Core {
-    /// Runs a non-throwing body on the core's queue.
-    func detachedValue<T>(_ body: @escaping () -> T) async -> T {
-        (try? await detached { body() })!
     }
 }

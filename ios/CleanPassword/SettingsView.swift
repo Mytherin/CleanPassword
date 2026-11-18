@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
-    @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var store: VaultStore
     @Environment(\.dismiss) private var dismiss
     @State private var settings: S3Settings?
     @State private var accessKeyId = ""
@@ -27,25 +27,24 @@ struct SettingsView: View {
                     if let e = s.endpoint { LabeledContent("Endpoint", value: e) }
                 }
                 NavigationLink("Access Key") { KeysView(accessKeyId: accessKeyId) }
-                Button("Sync Now") { model.sync() }
+                Button("Sync Now") { store.sync() }
             }
             Section {
                 if BiometricKey.isAvailable {
                     Toggle("Unlock with \(BiometricKey.biometryName)", isOn: $biometrics)
                         .onChange(of: biometrics) { _, on in
                             Task {
-                                do { try await model.setBiometrics(on) } catch { self.error = describe(error); biometrics = model.biometricsOn }
+                                do { try await store.setBiometrics(on) } catch { self.error = message(error); biometrics = store.biometricsOn }
                             }
                         }
                 }
-                Picker("Lock After", selection: $model.autoLockSeconds) {
+                Picker("Lock After", selection: $store.autoLockSeconds) {
                     Text("Immediately").tag(0)
                     Text("1 minute").tag(60)
                     Text("5 minutes").tag(300)
                     Text("15 minutes").tag(900)
                     Text("1 hour").tag(3600)
                 }
-                NavigationLink("Security Recommendations") { AuditView() }
                 NavigationLink("Change Master Password") { ChangePasswordView() }
             } header: {
                 Text("Security")
@@ -57,7 +56,7 @@ struct SettingsView: View {
                 Toggle("Suggestions Above the Keyboard", isOn: $suggestions)
                     .onChange(of: suggestions) { _, on in
                         SuggestionStore.setEnabled(on)
-                        if on { SuggestionStore.update(with: model.items) } else { SuggestionStore.clear() }
+                        if on { SuggestionStore.update(with: store.items) } else { SuggestionStore.clear() }
                     }
             } header: {
                 Text("AutoFill")
@@ -67,7 +66,6 @@ struct SettingsView: View {
             Section("Data") {
                 Button("Import…") { importing = true }
                 Button("Export…") { Task { await export() } }
-                NavigationLink("Recently Deleted") { TrashView() }
             }
             if let importResult {
                 Section { Text(importResult).font(.footnote) }
@@ -85,7 +83,7 @@ struct SettingsView: View {
         .task {
             settings = try? await Core.shared.run { $0.settings() }
             accessKeyId = (try? await Core.shared.run { $0.accessKeyId() }) ?? ""
-            biometrics = model.biometricsOn
+            biometrics = store.biometricsOn
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.json, .commaSeparatedText, .plainText]) { result in
             guard case let .success(url) = result else { return }
@@ -115,7 +113,7 @@ struct SettingsView: View {
         .confirmationDialog("Remove the vault from this iPhone?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
                 dismiss()
-                model.forget()
+                store.forget()
             }
         } message: {
             Text("It stays in S3. Changes made here that haven't synced yet are lost.")
@@ -124,11 +122,11 @@ struct SettingsView: View {
 
     private func runImport(_ text: String, password: String?) async {
         do {
-            let r = try await model.change { try $0.importFile(text: text, password: password) }
+            let r = try await store.change { try $0.importFile(text: text, password: password) }
             importPassword = ""
             importResult = (["Imported \(r.added) item(s)" + (r.skipped > 0 ? "; \(r.skipped) were already here." : ".")] + r.warnings).joined(separator: "\n\n")
         } catch {
-            self.error = describe(error)
+            self.error = message(error)
         }
     }
 
@@ -155,7 +153,7 @@ struct JSONDoc: FileDocument {
 }
 
 struct KeysView: View {
-    @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var store: VaultStore
     @Environment(\.dismiss) private var dismiss
     let accessKeyId: String
     @State private var keyId = ""
@@ -176,10 +174,10 @@ struct KeysView: View {
                 Task {
                     do {
                         let keys = AwsKeys(accessKeyId: keyId.trimmingCharacters(in: .whitespaces), secretAccessKey: secret.trimmingCharacters(in: .whitespaces), sessionToken: nil)
-                        try await model.change { try $0.setKeys(keys: keys) }
+                        try await store.change { try $0.setKeys(keys: keys) }
                         dismiss()
                     } catch {
-                        self.error = describe(error)
+                        self.error = message(error)
                     }
                 }
             }
@@ -190,7 +188,7 @@ struct KeysView: View {
 }
 
 struct ChangePasswordView: View {
-    @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var store: VaultStore
     @Environment(\.dismiss) private var dismiss
     @State private var current = ""
     @State private var new = ""
@@ -215,72 +213,15 @@ struct ChangePasswordView: View {
                     guard new == again else { error = "The new passwords don't match."; return }
                     do {
                         let (c, n) = (current, new)
-                        try await model.change { try $0.changeMasterPassword(current: c, newPassword: n) }
+                        try await store.change { try $0.changeMasterPassword(current: c, newPassword: n) }
                         dismiss()
                     } catch {
-                        self.error = describe(error)
+                        self.error = message(error)
                     }
                 }
             }
             .disabled(current.isEmpty || new.isEmpty)
         }
         .navigationTitle("Master Password")
-    }
-}
-
-struct AuditView: View {
-    @EnvironmentObject var model: AppModel
-    @State private var findings: [AuditFinding] = []
-
-    var body: some View {
-        List(findings) { f in
-            NavigationLink(value: f.id) {
-                VStack(alignment: .leading) {
-                    Text(f.name)
-                    Text([f.reused > 0 ? "Reused on \(f.reused) other item(s)" : nil, f.weak ? "Weak" : nil].compactMap { $0 }.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.orange)
-                }
-            }
-        }
-        .overlay { if findings.isEmpty { ContentUnavailableView("No Weak or Reused Passwords", systemImage: "checkmark.shield") } }
-        .navigationDestination(for: String.self) { ItemDetailView(id: $0) }
-        .navigationTitle("Security Recommendations")
-        .task { findings = (try? await Core.shared.run { $0.audit() }) ?? [] }
-    }
-}
-
-struct TrashView: View {
-    @EnvironmentObject var model: AppModel
-    @State private var items: [VaultItem] = []
-
-    var body: some View {
-        List {
-            Section {
-                ForEach(items) { i in
-                    HStack {
-                        Monogram(name: i.fields.name)
-                        Text(i.fields.name)
-                        Spacer()
-                        Button("Recover") { Task { await act { try $0.restore(id: i.id) } } }.buttonStyle(.borderless)
-                    }
-                    .swipeActions {
-                        Button("Delete", role: .destructive) { Task { await act { try $0.purge(id: i.id) } } }
-                    }
-                }
-            } footer: {
-                Text("Items are deleted for good after 30 days.")
-            }
-        }
-        .navigationTitle("Recently Deleted")
-        .task { await load() }
-    }
-
-    private func load() async {
-        items = (try? await Core.shared.run { $0.trash() }) ?? []
-    }
-
-    private func act(_ body: @escaping (VaultSession) throws -> Void) async {
-        try? await model.change(body)
-        await load()
     }
 }

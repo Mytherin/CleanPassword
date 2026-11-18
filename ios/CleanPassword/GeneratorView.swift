@@ -124,10 +124,17 @@ struct StoredRecipe: Codable {
         case .apple: kind = 0
         case let .random(l, lo, up, d, s, a):
             kind = 1
-            (length, lowercase, uppercase, digits, symbols, avoidAmbiguous) = (Int(l), lo, up, d, s, a)
+            length = Int(l)
+            lowercase = lo
+            uppercase = up
+            digits = d
+            symbols = s
+            avoidAmbiguous = a
         case let .passphrase(w, _, c, n):
             kind = 2
-            (words, capitalize, number) = (Int(w), c, n)
+            words = Int(w)
+            capitalize = c
+            number = n
         }
     }
 

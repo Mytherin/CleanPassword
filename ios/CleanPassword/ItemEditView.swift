@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ItemEditView: View {
-    @EnvironmentObject var model: AppModel
+    @EnvironmentObject private var store: VaultStore
     @Environment(\.dismiss) private var dismiss
     let item: VaultItem?
     @State private var f: ItemFields
@@ -91,10 +91,10 @@ struct ItemEditView: View {
         let previous = Dictionary(f.websites.map { ($0.uri, $0.matching) }, uniquingKeysWith: { a, _ in a })
         fields.websites = websites.map { $0.uri.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { Website(uri: $0, matching: previous[$0] ?? .default) }
         do {
-            _ = try await model.save(id: item?.id, fields: fields)
+            _ = try await store.save(id: item?.id, fields: fields)
             dismiss()
         } catch {
-            self.error = describe(error)
+            self.error = message(error)
         }
     }
 }
