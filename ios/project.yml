@@ -48,17 +48,9 @@ targets:
       - sdk: SystemConfiguration.framework
       - sdk: AuthenticationServices.framework
       - sdk: LocalAuthentication.framework
-    preBuildScripts:
-      - name: Build the Rust core
-        basedOnDependencyAnalysis: false
-        script: |
-          if [ "$CONFIGURATION" = "Debug" ]; then
-            "$PROJECT_DIR/build-rust.sh" --debug
-          else
-            "$PROJECT_DIR/build-rust.sh"
-          fi
-        outputFiles:
-          - $(PROJECT_DIR)/Generated/cleanpassword_ffi.swift
+      - target: RustCore
+        embed: false
+        link: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cleanpassword.app
@@ -104,6 +96,9 @@ targets:
           - group.com.cleanpassword.app
         com.apple.developer.authentication-services.autofill-credential-provider: true
     dependencies:
+      - target: RustCore
+        embed: false
+        link: false
       - framework: build/CleanPasswordCore.xcframework
         embed: false
         link: true
@@ -131,3 +126,20 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cleanpassword.tests
         GENERATE_INFOPLIST_FILE: YES
+
+# The Rust core and its Swift bindings (ios/build-rust.sh), built first: the
+# app and its AutoFill extension both compile the generated Swift, so the
+# script runs in a target of its own that both depend on.
+aggregateTargets:
+  RustCore:
+    buildScripts:
+      - name: Build the Rust core
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "$CONFIGURATION" = "Debug" ]; then
+            "$PROJECT_DIR/build-rust.sh" --debug
+          else
+            "$PROJECT_DIR/build-rust.sh"
+          fi
+        outputFiles:
+          - $(PROJECT_DIR)/Generated/cleanpassword_ffi.swift
