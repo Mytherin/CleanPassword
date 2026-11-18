@@ -98,14 +98,14 @@ They can't read or forge items. Turn on **S3 versioning**, so a deleted or overw
    {
      "Version": "2012-10-17",
      "Statement": [
-       { "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::BUCKET",
-         "Condition": { "StringLike": { "s3:prefix": ["CleanPassword/*"] } } },
+       { "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::BUCKET" },
        { "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
          "Resource": "arn:aws:s3:::BUCKET/CleanPassword/*" }
      ]
    }
    ```
 
+   `s3:ListBucket` has no folder condition on purpose: without list permission that applies to every request, S3 answers "access denied" instead of "not found" for a missing object, and CleanPassword couldn't tell a new folder from a forbidden one. The cost is that the key can list the names of every object in the bucket, so give CleanPassword a bucket of its own.
 3. Create an access key for that user ("Application running outside AWS") and enter it in the extension or the app, with the bucket, its region and the folder.
 
 S3-compatible services (Cloudflare R2, MinIO, …) work too, as long as they support conditional writes (`If-Match`, `If-None-Match: *`). Enter their endpoint under "S3-compatible service".
