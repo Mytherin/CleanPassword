@@ -1,0 +1,20 @@
+{
+  "name": "cleanpassword-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CleanPassword for Chrome: the vault in an S3 bucket of your own, with autofill.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node build.mjs && node test/run.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.0.287",
+    "esbuild": "0.24.2",
+    "puppeteer-core": "25.16.0",
+    "typescript": "5.7.3"
+  }
+}

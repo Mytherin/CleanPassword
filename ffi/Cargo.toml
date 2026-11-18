@@ -1,0 +1,29 @@
+[package]
+name = "cleanpassword-ffi"
+description = "CleanPassword's core for Swift (the iPhone app and its AutoFill extension), through UniFFI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "cleanpassword_ffi"
+# staticlib for the iOS app (in an XCFramework); cdylib to generate the
+# Swift bindings from the library's metadata; lib for the tests.
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+cleanpassword-core = { path = "../core" }
+uniffi = "0.29"
+# Sync's HTTP on iOS (the platform's TLS); redirects are not followed.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+pollster = "0.4"
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

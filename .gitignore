@@ -1,0 +1,10 @@
+/target
+/.claude/worktrees
+/extension/dist
+/extension/node_modules
+/extension/src/core
+/ios/build
+/ios/Generated
+/ios/*.xcodeproj
+/extension/test/dist-test
+/extension/test/build
