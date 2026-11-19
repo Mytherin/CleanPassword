@@ -48,6 +48,11 @@ export class Overlay {
   private reshown: number[] = [];
   private anchor: HTMLElement | null = null;
   private token = "";
+  /** The frame has loaded our page (it has messaged us). Until then its
+   *  window is the initial about:blank, of the page's origin, and posting to
+   *  it fails. */
+  private ready = false;
+  private focusPending = false;
   /** Top-layer elements already open when ours was last shown: ours is
    *  above them. Only ones opened since can cover it. */
   private beneath = new Set<Element>();
@@ -115,6 +120,8 @@ export class Overlay {
     this.host = host;
     this.frame = frame;
     this.token = token;
+    this.ready = false;
+    this.focusPending = false;
     this.size(this.placement === "below" ? 52 : 140);
     this.position();
     this.raise(host);
@@ -151,6 +158,10 @@ export class Overlay {
   /** Keyboard users: arrow down from the field into the menu. */
   focusInside(): void {
     this.frame?.focus();
+    if (!this.ready) {
+      this.focusPending = true;
+      return;
+    }
     this.frame?.contentWindow?.postMessage({ type: "focus-first", token: this.token }, EXT_ORIGIN);
   }
 
@@ -177,6 +188,7 @@ export class Overlay {
 
   /** Tells the frame how tall it may be (it scrolls its list to fit). */
   private sendRoom(): void {
+    if (!this.ready) return;
     this.frame?.contentWindow?.postMessage({ type: "max-height", height: this.room, token: this.token }, EXT_ORIGIN);
   }
 
@@ -266,6 +278,13 @@ export class Overlay {
   private onMessage(e: MessageEvent): void {
     if (!this.frame || e.source !== this.frame.contentWindow || e.origin !== EXT_ORIGIN) return;
     const m = e.data as { type?: string; height?: number };
+    if (!this.ready) {
+      this.ready = true;
+      if (this.focusPending) {
+        this.focusPending = false;
+        this.focusInside();
+      }
+    }
     if (m.type === "height" && typeof m.height === "number") {
       this.sendRoom();
       this.size(m.height);
