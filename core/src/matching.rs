@@ -143,6 +143,16 @@ pub fn shares_credentials(saved: &str, page: &str) -> bool {
     s.from_to.iter().any(|(from, to)| from.iter().any(|d| d == saved) && to.iter().any(|d| d == page))
 }
 
+/// One key per site, for telling whether two logins are for the same site:
+/// the registrable domain, or the group of domains sharing one sign-in
+/// (`envato.com` and `themeforest.net` are one site).
+pub fn site_key(domain: &str) -> String {
+    match shared().groups.get(domain) {
+        Some(g) => format!("shared:{g}"),
+        None => domain.to_owned(),
+    }
+}
+
 struct Shared {
     /// Domain → index of the group it shares sign-ins with.
     groups: HashMap<String, usize>,

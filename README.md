@@ -21,7 +21,7 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 - **One-time codes** (TOTP): RFC 6238 with SHA-1/256/512, `otpauth://` URIs and Steam codes.
 - **Password history:** every changed password is kept, the last 20 per item.
 - **Trash:** deleted items can be recovered for 30 days.
-- **Security recommendations:** weak and reused passwords.
+- **Security recommendations:** weak passwords, and passwords reused across sites (another host of the same domain, or a domain sharing its sign-in, is the same site).
 - **Sync** between any number of devices.
   - Edits made on two devices are merged field by field. When both changed the same password, the losing one goes into the history.
   - An edit beats a delete.

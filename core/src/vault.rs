@@ -18,7 +18,7 @@
 //! state. So nothing readable is stored on the device either; the access
 //! key is only usable once the vault is unlocked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -216,7 +216,9 @@ pub struct AuditEntry {
     pub id: String,
     pub name: String,
     pub weak: bool,
-    /// How many other items use the same password.
+    /// On how many other sites the same password is used. Other items for
+    /// the same site (`marktplaats.nl` and `www.marktplaats.nl`, a second
+    /// account, a duplicate) don't count.
     pub reused: usize,
 }
 
@@ -490,19 +492,31 @@ impl Vault {
     }
 
     /// Weak and reused passwords, worst first.
+    ///
+    /// A password is reused when it is also used on another *site*: another
+    /// registrable domain, not counting domains that share one sign-in.
+    /// Items without a website are told apart by name.
     pub fn audit(&self) -> Vec<AuditEntry> {
         let items: Vec<&Item> = self.items().into_iter().filter(|i| i.kind == ItemKind::Login && !i.password.is_empty()).collect();
-        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for i in &items {
-            *counts.entry(i.password.as_str()).or_default() += 1;
+        let item_sites: Vec<BTreeSet<String>> = items
+            .iter()
+            .map(|i| {
+                let s: BTreeSet<String> = i.uris.iter().filter_map(|u| matching::parse_page(&u.uri)).map(|p| matching::site_key(&p.domain)).collect();
+                if s.is_empty() { BTreeSet::from([format!("name:{}", i.name.trim().to_lowercase())]) } else { s }
+            })
+            .collect();
+        let mut by_password: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (i, s) in items.iter().zip(&item_sites) {
+            by_password.entry(i.password.as_str()).or_default().extend(s.iter().map(String::as_str));
         }
         let mut out: Vec<AuditEntry> = items
             .iter()
-            .map(|i| AuditEntry {
+            .zip(&item_sites)
+            .map(|(i, own)| AuditEntry {
                 id: i.id.clone(),
                 name: i.name.clone(),
                 weak: crate::generator::strength(&i.password).score < 3,
-                reused: counts[i.password.as_str()] - 1,
+                reused: by_password[i.password.as_str()].iter().filter(|s| !own.contains(**s)).count(),
             })
             .filter(|e| e.weak || e.reused > 0)
             .collect();
@@ -706,6 +720,28 @@ pub(crate) mod tests {
         assert_eq!(a.len(), 3);
         assert_eq!(a[0].reused, 1);
         assert!(a.iter().any(|e| e.name == "A" && e.weak));
+    }
+
+    #[test]
+    fn audit_counts_sites_not_items() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let pw = "Tq8#xk2!Lm9@vR4z";
+        // One site under several hosts, and a second account: not reuse.
+        v.add(login("M1", "https://marktplaats.nl", "x", pw)).unwrap();
+        v.add(login("M2", "https://www.marktplaats.nl", "y", pw)).unwrap();
+        v.add(login("M3", "marktplaats.nl/login", "x", pw)).unwrap();
+        // Domains sharing one sign-in are one site.
+        v.add(login("E1", "https://envato.com", "x", "Zp3$wq7&Hn5^cY1e")).unwrap();
+        v.add(login("E2", "https://themeforest.net", "x", "Zp3$wq7&Hn5^cY1e")).unwrap();
+        // Items without a website, with the same name, are one site.
+        v.add(login("Wifi", "", "", "Hy6@pL0!vB8#nQ3s")).unwrap();
+        v.add(login("wifi ", "", "", "Hy6@pL0!vB8#nQ3s")).unwrap();
+        assert!(v.audit().is_empty(), "{:?}", v.audit());
+        // Another site with the password: each of its items is reused on one other site.
+        v.add(login("Other", "https://other.com", "x", pw)).unwrap();
+        let a = v.audit();
+        assert_eq!(a.len(), 4);
+        assert!(a.iter().all(|e| e.reused == 1));
     }
 
     #[test]

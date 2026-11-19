@@ -715,7 +715,7 @@ async function audit(from: () => unknown = settingsView): Promise<void> {
   screen("Security", back(() => void from()), [],
     entries.length
       ? h("div", {}, ...entries.map((e) => h("button", { class: "row", onclick: () => void detail(e.id) }, monogram(e.name),
-        h("span", { class: "text" }, h("div", { class: "title" }, e.name), h("div", { class: "sub" }, [e.reused ? `Reused on ${e.reused} other item(s)` : "", e.weak ? "Weak" : ""].filter(Boolean).join(" · "))))))
+        h("span", { class: "text" }, h("div", { class: "title" }, e.name), h("div", { class: "sub" }, [e.reused ? `Reused on ${e.reused} other site${e.reused === 1 ? "" : "s"}` : "", e.weak ? "Weak" : ""].filter(Boolean).join(" · "))))))
       : h("p", { class: "muted", style: "padding: 12px" }, "No weak or reused passwords. 👍"));
 }
 

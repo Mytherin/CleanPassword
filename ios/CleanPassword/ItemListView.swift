@@ -115,7 +115,7 @@ private struct SecurityList: View {
         List {
             if !reused.isEmpty {
                 Section {
-                    ForEach(reused) { f in row(f, "Used on \(f.reused + 1) items") }
+                    ForEach(reused) { f in row(f, "Used on \(f.reused + 1) sites") }
                 } header: {
                     Text("Reused Passwords")
                 } footer: {
