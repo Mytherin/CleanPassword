@@ -524,6 +524,42 @@ mod tests {
         assert_eq!(b.items().len(), 1);
     }
 
+    /// CleanNotes can use the same folder: its objects (head, notes/,
+    /// folders/, attachments/, encryption.json) are neither read, counted
+    /// as unreadable, nor touched; and CleanPassword's own stay out of
+    /// CleanNotes' way (vault.json and items/ are names it doesn't use).
+    #[test]
+    fn shares_a_folder_with_cleannotes() {
+        let s3 = FakeS3::new();
+        let notes = [
+            "Vault/head",
+            "Vault/encryption.json",
+            "Vault/notes/abc.md",
+            "Vault/notes/def.md",
+            "Vault/folders/f1.json",
+            "Vault/attachments/0123abcd.png",
+        ];
+        for k in notes {
+            s3.objects.borrow_mut().insert(k.into(), (b"CleanNotes data".to_vec(), format!("\"{k}\"")));
+        }
+        let mut a = Vault::create(config(), creds(), PW).unwrap();
+        a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        let r = block_on(a.sync(&s3)).unwrap();
+        assert_eq!((r.uploaded, r.unreadable), (1, 0));
+        let mut b = join(&s3);
+        assert_eq!(b.items().len(), 1);
+        a.purge(&a.items()[0].id.clone()).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        a.s.tombstones.values_mut().for_each(|g| g.at = Utc::now() - Duration::days(31));
+        block_on(a.sync(&s3)).unwrap();
+        assert_eq!(block_on(b.sync(&s3)).unwrap().unreadable, 0);
+        let objects = s3.objects.borrow();
+        for k in notes {
+            assert_eq!(objects[k], (b"CleanNotes data".to_vec(), format!("\"{k}\"")), "{k} untouched");
+        }
+        assert!(objects.keys().all(|k| notes.contains(&k.as_str()) || k == "Vault/vault.json" || k.starts_with("Vault/items/")));
+    }
+
     #[test]
     fn old_tombstones_are_cleaned_up() {
         let (s3, mut a, _) = setup();

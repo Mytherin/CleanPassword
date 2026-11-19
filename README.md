@@ -114,6 +114,15 @@ They can't read or forge items. Turn on **S3 versioning**, so a deleted or overw
    `s3:ListBucket` has no folder condition on purpose: without list permission that applies to every request, S3 answers "access denied" instead of "not found" for a missing object, and CleanPassword couldn't tell a new folder from a forbidden one. The cost is that the key can list the names of every object in the bucket, so give CleanPassword a bucket of its own.
 3. Create an access key for that user ("Application running outside AWS") and enter it in the extension or the app, with the bucket, its region and the folder.
 
+**Sharing a folder with CleanNotes.** CleanPassword can use the same bucket, folder and access key as [CleanNotes](../CleanNotes): enter CleanNotes' folder (e.g. `CleanNotes`) instead of `CleanPassword` when setting up. The two apps' objects don't overlap, and each ignores the other's:
+
+```text
+<folder>/vault.json, items/…                                       CleanPassword
+<folder>/head, notes/…, folders/…, attachments/…, encryption.json   CleanNotes
+```
+
+CleanPassword's vault is encrypted with its own master password either way, whether or not the notes folder has an encryption key. Its changes don't touch `head`, so they don't make CleanNotes devices sync. (`core/src/sync.rs` tests this: `shares_a_folder_with_cleannotes`.)
+
 S3-compatible services (Cloudflare R2, MinIO, …) work too, as long as they support conditional writes (`If-Match`, `If-None-Match: *`). Enter their endpoint under "S3-compatible service".
 
 ## Building
