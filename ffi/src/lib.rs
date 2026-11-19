@@ -232,6 +232,8 @@ pub struct OneTimeCode {
 pub struct ImportOutcome {
     pub added: u64,
     pub skipped: u64,
+    /// Logins merged into one already here for another host of the site.
+    pub merged: u64,
     /// Passkeys brought in.
     pub passkeys: u64,
     pub warnings: Vec<String>,
@@ -531,12 +533,23 @@ impl VaultSession {
         self.v().audit().into_iter().map(|a| AuditFinding { id: a.id, name: a.name, weak: a.weak, reused: a.reused as u64 }).collect()
     }
 
+    /// How many logins `merge_duplicates` would merge into others.
+    pub fn duplicates(&self) -> u64 {
+        self.v().duplicates() as u64
+    }
+
+    /// Merges logins saved more than once for one site (once per host, as
+    /// browsers export them); the others go to the trash. Returns how many.
+    pub fn merge_duplicates(&self) -> u64 {
+        self.v().merge_duplicates() as u64
+    }
+
     /// Imports a Bitwarden (JSON, password-protected JSON, CSV) or other CSV
     /// export.
     pub fn import_file(&self, text: String, password: Option<String>) -> R<ImportOutcome> {
         let imported = import::import_file(&text, password.as_deref())?;
         let s = self.v().import(imported.items);
-        Ok(ImportOutcome { added: s.added as u64, skipped: s.skipped as u64, passkeys: s.passkeys as u64, warnings: imported.warnings })
+        Ok(ImportOutcome { added: s.added as u64, skipped: s.skipped as u64, merged: s.merged as u64, passkeys: s.passkeys as u64, warnings: imported.warnings })
     }
 
     /// Everything as an unencrypted Bitwarden JSON export.

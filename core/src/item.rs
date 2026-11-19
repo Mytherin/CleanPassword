@@ -230,6 +230,77 @@ impl Item {
     pub fn first_host(&self) -> Option<String> {
         self.uris.iter().find_map(|u| crate::matching::parse_page(&u.uri).map(|p| p.host))
     }
+
+    /// The registrable domains of the item's websites.
+    fn domains(&self) -> std::collections::BTreeSet<String> {
+        self.uris.iter().filter_map(|u| crate::matching::parse_page(&u.uri)).map(|p| p.domain).collect()
+    }
+
+    /// Whether `other` is the same login saved again, as browsers export a
+    /// login once per host (`marktplaats.nl`, `www.marktplaats.nl`): a login
+    /// with the same user name and password on the same site, and nothing
+    /// that would be lost by merging it into this one (a different TOTP
+    /// secret, notes, folder or custom fields).
+    pub fn same_login(&self, other: &Item) -> bool {
+        fn fits(a: &str, b: &str) -> bool {
+            a.is_empty() || b.is_empty() || a == b
+        }
+        self.kind == ItemKind::Login
+            && other.kind == ItemKind::Login
+            && !self.password.is_empty()
+            && self.password == other.password
+            && self.username.trim().to_lowercase() == other.username.trim().to_lowercase()
+            && !self.domains().is_disjoint(&other.domains())
+            && fits(&self.totp, &other.totp)
+            && fits(self.notes.trim(), other.notes.trim())
+            && fits(&self.folder, &other.folder)
+            && (self.fields.is_empty() || other.fields.is_empty() || self.fields == other.fields)
+    }
+
+    /// Merges in a [`same_login`](Self::same_login) item: its websites,
+    /// passkeys and old passwords, and what this one lacks. Returns whether
+    /// anything changed.
+    pub fn absorb(&mut self, other: &Item, now: DateTime<Utc>) -> bool {
+        let before = (self.data(), self.history.len(), self.passkeys.len());
+        let key = |u: &ItemUri| (crate::matching::parse_page(&u.uri).map(|p| p.url).unwrap_or_else(|| u.uri.trim().to_owned()), u.match_mode);
+        for u in &other.uris {
+            if !self.uris.iter().any(|v| key(v) == key(u)) {
+                self.uris.push(u.clone());
+            }
+        }
+        // Keep a name someone gave it over one made from a host.
+        let hosts: Vec<String> = self.uris.iter().filter_map(|u| crate::matching::parse_page(&u.uri)).flat_map(|p| [p.host, p.domain]).collect();
+        let generated = |n: &str| n.trim().is_empty() || hosts.iter().any(|h| h.eq_ignore_ascii_case(n.trim()));
+        if generated(&self.name) && !generated(&other.name) {
+            self.name = other.name.trim().to_owned();
+        }
+        for (mine, theirs) in [(&mut self.totp, &other.totp), (&mut self.notes, &other.notes), (&mut self.folder, &other.folder)] {
+            if mine.trim().is_empty() {
+                mine.clone_from(theirs);
+            }
+        }
+        if self.fields.is_empty() {
+            self.fields.clone_from(&other.fields);
+        }
+        self.favorite |= other.favorite;
+        for p in &other.passkeys {
+            if !self.passkeys.iter().any(|q| q.credential_id == p.credential_id) {
+                self.passkeys.push(p.clone());
+            }
+        }
+        for h in &other.history {
+            if h.password != self.password && !self.history.iter().any(|g| g.password == h.password) {
+                self.history.push(h.clone());
+            }
+        }
+        self.history.sort_by(|a, b| b.retired.cmp(&a.retired));
+        self.history.truncate(HISTORY_LIMIT);
+        let changed = before != (self.data(), self.history.len(), self.passkeys.len());
+        if changed {
+            self.modified = now;
+        }
+        changed
+    }
 }
 
 /// `" Work / Email/ "` → `"Work/Email"`.

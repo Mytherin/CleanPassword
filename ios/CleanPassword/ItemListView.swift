@@ -113,9 +113,20 @@ private struct SecurityList: View {
         let reused = store.findings.filter { $0.reused > 0 }
         let weak = store.findings.filter { $0.reused == 0 && $0.weak }
         List {
+            if store.duplicates > 0 {
+                Section {
+                    Button(store.duplicates == 1 ? "Merge 1 Duplicate" : "Merge \(store.duplicates) Duplicates") {
+                        Task { try? await store.change { $0.mergeDuplicates() } }
+                    }
+                } header: {
+                    Text("Duplicate Logins")
+                } footer: {
+                    Text("Logins saved more than once for the same site, user name and password, as browsers save one per host (example.com, www.example.com). Merging keeps every website; the copies go to Recently Deleted.")
+                }
+            }
             if !reused.isEmpty {
                 Section {
-                    ForEach(reused) { f in row(f, "Used on \(f.reused + 1) items") }
+                    ForEach(reused) { f in row(f, "Used on \(f.reused + 1) sites") }
                 } header: {
                     Text("Reused Passwords")
                 } footer: {
@@ -133,7 +144,7 @@ private struct SecurityList: View {
             }
         }
         .overlay {
-            if store.findings.isEmpty {
+            if store.findings.isEmpty && store.duplicates == 0 {
                 ContentUnavailableView("No Security Recommendations", systemImage: "checkmark.shield", description: Text("No weak or reused passwords."))
             }
         }

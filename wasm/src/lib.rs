@@ -118,6 +118,7 @@ struct HeaderInfo {
 struct ImportResult {
     added: usize,
     skipped: usize,
+    merged: usize,
     warnings: Vec<String>,
 }
 
@@ -195,6 +196,18 @@ impl Session {
         self.with(|v| to_js(&v.audit()))?.map_err(bad)
     }
 
+    /// How many logins `mergeDuplicates` would merge into others.
+    pub fn duplicates(&self) -> JsResult<usize> {
+        self.with(|v| v.duplicates())
+    }
+
+    /// Merges logins saved more than once for one site (once per host, as
+    /// browsers export them); the others go to the trash. Returns how many.
+    #[wasm_bindgen(js_name = mergeDuplicates)]
+    pub fn merge_duplicates(&self) -> JsResult<usize> {
+        self.with_mut(|v| v.merge_duplicates())
+    }
+
     pub fn add(&self, data: JsValue) -> JsResult<String> {
         let data: ItemData = from_js(data).map_err(bad)?;
         self.with_mut(|v| v.add(data))?.map_err(err)
@@ -231,7 +244,7 @@ impl Session {
         let warnings = imported.warnings;
         let items: Vec<ImportedItem> = imported.items;
         let s = self.with_mut(|v| v.import(items))?;
-        to_js(&ImportResult { added: s.added, skipped: s.skipped, warnings }).map_err(bad)
+        to_js(&ImportResult { added: s.added, skipped: s.skipped, merged: s.merged, warnings }).map_err(bad)
     }
 
     /// Every item as an unencrypted Bitwarden JSON export.

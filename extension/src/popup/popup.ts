@@ -712,10 +712,21 @@ async function codesView(items: Item[]): Promise<void> {
 
 async function audit(from: () => unknown = settingsView): Promise<void> {
   const entries = await ask<{ id: string; name: string; weak: boolean; reused: number }[]>("audit");
-  screen("Security", back(() => void from()), [],
+  const duplicates = await ask<number>("duplicates");
+  // Browsers save a login once per host (marktplaats.nl, www.marktplaats.nl),
+  // and their exports bring each in as an item.
+  const merge = duplicates
+    ? h("div", { style: "padding: 8px 12px" },
+      h("p", { class: "small muted" }, `${duplicates} login${duplicates === 1 ? " is a copy" : "s are copies"} of another for the same site, user name and password (saved once per host by a browser). Merging keeps every website; the copies go to Deleted.`),
+      h("button", { class: "btn", onclick: async () => {
+        await ask<number>("merge-duplicates");
+        void audit(from);
+      } }, `Merge ${duplicates} duplicate${duplicates === 1 ? "" : "s"}`))
+    : null;
+  screen("Security", back(() => void from()), [], merge,
     entries.length
       ? h("div", {}, ...entries.map((e) => h("button", { class: "row", onclick: () => void detail(e.id) }, monogram(e.name),
-        h("span", { class: "text" }, h("div", { class: "title" }, e.name), h("div", { class: "sub" }, [e.reused ? `Reused on ${e.reused} other item(s)` : "", e.weak ? "Weak" : ""].filter(Boolean).join(" · "))))))
+        h("span", { class: "text" }, h("div", { class: "title" }, e.name), h("div", { class: "sub" }, [e.reused ? `Reused on ${e.reused} other site${e.reused === 1 ? "" : "s"}` : "", e.weak ? "Weak" : ""].filter(Boolean).join(" · "))))))
       : h("p", { class: "muted", style: "padding: 12px" }, "No weak or reused passwords. 👍"));
 }
 
@@ -752,9 +763,10 @@ function importView(): void {
     e.preventDefault();
     void run(err, async () => {
       if (!text) throw new Error("Choose the export file.");
-      const r = await ask<{ added: number; skipped: number; warnings: string[] }>("import", { text, password: pw.value });
+      const r = await ask<{ added: number; skipped: number; merged: number; warnings: string[] }>("import", { text, password: pw.value });
       text = "";
-      result.replaceChildren(h("p", {}, `Imported ${r.added} item(s)${r.skipped ? `; ${r.skipped} were already here` : ""}.`), ...r.warnings.map((w) => h("p", { class: "warn" }, w)));
+      const also = [r.merged ? `${r.merged} merged into a login for the same site` : "", r.skipped ? `${r.skipped} were already here` : ""].filter(Boolean).join("; ");
+      result.replaceChildren(h("p", {}, `Imported ${r.added} item(s)${also ? `; ${also}` : ""}.`), ...r.warnings.map((w) => h("p", { class: "warn" }, w)));
       void ask("sync");
     }, go);
   });

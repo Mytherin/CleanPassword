@@ -18,7 +18,7 @@
 //! state. So nothing readable is stored on the device either; the access
 //! key is only usable once the vault is unlocked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -216,7 +216,9 @@ pub struct AuditEntry {
     pub id: String,
     pub name: String,
     pub weak: bool,
-    /// How many other items use the same password.
+    /// On how many other sites the same password is used. Other items for
+    /// the same site (`marktplaats.nl` and `www.marktplaats.nl`, a second
+    /// account, a duplicate) don't count.
     pub reused: usize,
 }
 
@@ -225,6 +227,10 @@ pub struct ImportSummary {
     pub added: usize,
     /// Already in the vault (same name, user name, password and website).
     pub skipped: usize,
+    /// The same login on another host of a site already here (as browsers
+    /// export a login once per host): merged into that item.
+    #[serde(default)]
+    pub merged: usize,
     /// Passkeys brought in, on new items or on ones already here.
     #[serde(default)]
     pub passkeys: usize,
@@ -490,19 +496,31 @@ impl Vault {
     }
 
     /// Weak and reused passwords, worst first.
+    ///
+    /// A password is reused when it is also used on another *site*: another
+    /// registrable domain, not counting domains that share one sign-in.
+    /// Items without a website are told apart by name.
     pub fn audit(&self) -> Vec<AuditEntry> {
         let items: Vec<&Item> = self.items().into_iter().filter(|i| i.kind == ItemKind::Login && !i.password.is_empty()).collect();
-        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for i in &items {
-            *counts.entry(i.password.as_str()).or_default() += 1;
+        let item_sites: Vec<BTreeSet<String>> = items
+            .iter()
+            .map(|i| {
+                let s: BTreeSet<String> = i.uris.iter().filter_map(|u| matching::parse_page(&u.uri)).map(|p| matching::site_key(&p.domain)).collect();
+                if s.is_empty() { BTreeSet::from([format!("name:{}", i.name.trim().to_lowercase())]) } else { s }
+            })
+            .collect();
+        let mut by_password: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for (i, s) in items.iter().zip(&item_sites) {
+            by_password.entry(i.password.as_str()).or_default().extend(s.iter().map(String::as_str));
         }
         let mut out: Vec<AuditEntry> = items
             .iter()
-            .map(|i| AuditEntry {
+            .zip(&item_sites)
+            .map(|(i, own)| AuditEntry {
                 id: i.id.clone(),
                 name: i.name.clone(),
                 weak: crate::generator::strength(&i.password).score < 3,
-                reused: counts[i.password.as_str()] - 1,
+                reused: by_password[i.password.as_str()].iter().filter(|s| !own.contains(**s)).count(),
             })
             .filter(|e| e.weak || e.reused > 0)
             .collect();
@@ -536,6 +554,25 @@ impl Vault {
                 }
                 continue;
             }
+            // The same login on another host of the site (browsers export
+            // one per host): merged into the one already here.
+            let now = Utc::now();
+            let mut candidate = Item::new(with_default_name(imported.data.clone()), now);
+            candidate.history = imported.history.clone();
+            candidate.passkeys = imported.passkeys.clone();
+            let same = self.s.items.values().filter(|i| i.deleted.is_none() && i.same_login(&candidate)).min_by_key(|i| (i.created, i.id.clone())).map(|i| i.id.clone());
+            if let Some(id) = same {
+                let item = self.s.items.get_mut(&id).expect("listed above");
+                let passkeys = item.passkeys.len();
+                if item.absorb(&candidate, now) {
+                    summary.merged += 1;
+                } else {
+                    summary.skipped += 1;
+                }
+                summary.passkeys += item.passkeys.len() - passkeys;
+                seen.insert(fp, id);
+                continue;
+            }
             match self.add(imported.data) {
                 Ok(id) => {
                     let item = self.s.items.get_mut(&id).expect("just added");
@@ -550,6 +587,55 @@ impl Vault {
             }
         }
         summary
+    }
+
+    /// Logins saved more than once for one site (see [`Item::same_login`]):
+    /// each merged into the oldest of its group, and the ids of the others.
+    fn duplicate_groups(&self) -> Vec<(Item, Vec<String>)> {
+        let mut items = self.items();
+        items.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
+        let now = Utc::now();
+        let mut groups: Vec<(Item, Vec<String>)> = Vec::new();
+        let mut by_login: std::collections::HashMap<(String, String), Vec<usize>> = std::collections::HashMap::new();
+        for i in items {
+            if i.kind != ItemKind::Login || i.password.is_empty() {
+                continue;
+            }
+            let bucket = by_login.entry((i.password.clone(), i.username.trim().to_lowercase())).or_default();
+            match bucket.iter().copied().find(|&g| groups[g].0.same_login(i)) {
+                Some(g) => {
+                    groups[g].0.absorb(i, now);
+                    groups[g].1.push(i.id.clone());
+                }
+                None => {
+                    bucket.push(groups.len());
+                    groups.push((i.clone(), Vec::new()));
+                }
+            }
+        }
+        groups.retain(|g| !g.1.is_empty());
+        groups
+    }
+
+    /// How many logins [`merge_duplicates`](Self::merge_duplicates) would
+    /// merge into others.
+    pub fn duplicates(&self) -> usize {
+        self.duplicate_groups().iter().map(|g| g.1.len()).sum()
+    }
+
+    /// Merges logins saved more than once for one site into one item with
+    /// all their websites; the others go to the trash. Returns how many.
+    pub fn merge_duplicates(&mut self) -> usize {
+        let mut n = 0;
+        for (merged, others) in self.duplicate_groups() {
+            self.s.items.insert(merged.id.clone(), merged);
+            for id in others {
+                if self.delete(&id).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     // ---- Master password -----------------------------------------------------
@@ -591,7 +677,7 @@ pub fn locked_info(saved: &str) -> Result<LockedInfo> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::item::ItemUri;
+    use crate::item::{HistoryEntry, ItemUri};
 
     pub fn config() -> S3Config {
         S3Config { bucket: "bucket".into(), region: "us-east-1".into(), prefix: "Vault".into(), endpoint: None }
@@ -709,17 +795,90 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn audit_counts_sites_not_items() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let pw = "Tq8#xk2!Lm9@vR4z";
+        // One site under several hosts, and a second account: not reuse.
+        v.add(login("M1", "https://marktplaats.nl", "x", pw)).unwrap();
+        v.add(login("M2", "https://www.marktplaats.nl", "y", pw)).unwrap();
+        v.add(login("M3", "marktplaats.nl/login", "x", pw)).unwrap();
+        // Domains sharing one sign-in are one site.
+        v.add(login("E1", "https://envato.com", "x", "Zp3$wq7&Hn5^cY1e")).unwrap();
+        v.add(login("E2", "https://themeforest.net", "x", "Zp3$wq7&Hn5^cY1e")).unwrap();
+        // Items without a website, with the same name, are one site.
+        v.add(login("Wifi", "", "", "Hy6@pL0!vB8#nQ3s")).unwrap();
+        v.add(login("wifi ", "", "", "Hy6@pL0!vB8#nQ3s")).unwrap();
+        assert!(v.audit().is_empty(), "{:?}", v.audit());
+        // Another site with the password: each of its items is reused on one other site.
+        v.add(login("Other", "https://other.com", "x", pw)).unwrap();
+        let a = v.audit();
+        assert_eq!(a.len(), 4);
+        assert!(a.iter().all(|e| e.reused == 1));
+    }
+
+    #[test]
     fn import_skips_duplicates() {
         let mut v = Vault::create(config(), creds(), PW).unwrap();
         let wrap = |d: ItemData| crate::import::ImportedItem { data: d, history: vec![], passkeys: vec![] };
         let items: Vec<_> = [login("A", "https://a.com", "x", "1"), login("A", "https://a.com", "x", "1"), login("B", "https://b.com", "x", "2")].into_iter().map(wrap).collect();
-        assert_eq!(v.import(items.clone()), ImportSummary { added: 2, skipped: 1, passkeys: 0 });
-        assert_eq!(v.import(items), ImportSummary { added: 0, skipped: 3, passkeys: 0 });
+        assert_eq!(v.import(items.clone()), ImportSummary { added: 2, skipped: 1, passkeys: 0, merged: 0 });
+        assert_eq!(v.import(items), ImportSummary { added: 0, skipped: 3, passkeys: 0, merged: 0 });
         // Nameless ones (Firefox's CSV has no names) are named after the
         // site, and still recognised the next time.
         let nameless = vec![wrap(login("", "https://www.c.com/login", "x", "3")), wrap(login(" ", "", "solo", "4"))];
-        assert_eq!(v.import(nameless.clone()), ImportSummary { added: 2, skipped: 0, passkeys: 0 });
-        assert_eq!(v.import(nameless), ImportSummary { added: 0, skipped: 2, passkeys: 0 });
+        assert_eq!(v.import(nameless.clone()), ImportSummary { added: 2, skipped: 0, passkeys: 0, merged: 0 });
+        assert_eq!(v.import(nameless), ImportSummary { added: 0, skipped: 2, passkeys: 0, merged: 0 });
+    }
+
+    #[test]
+    fn import_merges_a_login_saved_per_host() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let wrap = |d: ItemData| crate::import::ImportedItem { data: d, history: vec![], passkeys: vec![] };
+        // As in a browser's export: one row per host, nameless.
+        let rows: Vec<_> = [
+            login("", "https://marktplaats.nl/", "me@x.nl", "pw1"),
+            login("", "https://www.marktplaats.nl/", "Me@x.nl", "pw1"),
+            login("", "http://www.marktplaats.nl/", "me@x.nl", "pw1"),
+            // Not the same login: another account, another password.
+            login("", "https://www.marktplaats.nl/", "other@x.nl", "pw1"),
+            login("", "https://www.marktplaats.nl/", "me@x.nl", "pw2"),
+        ]
+        .into_iter()
+        .map(wrap)
+        .collect();
+        assert_eq!(v.import(rows.clone()), ImportSummary { added: 3, skipped: 0, passkeys: 0, merged: 2 });
+        let merged = v.items().into_iter().find(|i| i.username == "me@x.nl" && i.password == "pw1").unwrap().clone();
+        assert_eq!(merged.uris.len(), 3);
+        assert_eq!(merged.name, "marktplaats.nl");
+        // Again: nothing new.
+        assert_eq!(v.import(rows), ImportSummary { added: 0, skipped: 5, passkeys: 0, merged: 0 });
+        assert_eq!(v.items().len(), 3);
+    }
+
+    #[test]
+    fn merge_duplicates_keeps_everything() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let a = v.add(login("marktplaats.nl", "https://marktplaats.nl", "me", "pw")).unwrap();
+        let b = v.add(ItemData { notes: "security question: blue".into(), favorite: true, ..login("Marktplaats", "https://www.marktplaats.nl", "me", "pw") }).unwrap();
+        let c = v.add(ItemData { totp: "JBSWY3DPEHPK3PXP".into(), ..login("", "https://login.marktplaats.nl", "me", "pw") }).unwrap();
+        v.s.items.get_mut(&c).unwrap().history.push(HistoryEntry { password: "old".into(), retired: Utc::now() });
+        // Not merged: a different TOTP secret would be lost.
+        v.add(ItemData { totp: "OTHERSECRET".into(), ..login("M", "https://marktplaats.nl", "me", "pw") }).unwrap();
+        // Not merged: another site.
+        v.add(login("Other", "https://other.nl", "me", "pw")).unwrap();
+        assert_eq!(v.duplicates(), 2);
+        assert_eq!(v.merge_duplicates(), 2);
+        assert_eq!(v.duplicates(), 0);
+        let m = v.get(&a).unwrap();
+        assert_eq!(m.uris.len(), 3);
+        assert_eq!(m.name, "Marktplaats");
+        assert_eq!(m.notes, "security question: blue");
+        assert_eq!(m.totp, "JBSWY3DPEHPK3PXP");
+        assert!(m.favorite);
+        assert_eq!(m.history.len(), 1);
+        // The others are in the trash, to restore.
+        assert!(v.get(&b).unwrap().deleted.is_some() && v.get(&c).unwrap().deleted.is_some());
+        assert_eq!(v.items().len(), 3);
     }
 
     #[test]
