@@ -87,6 +87,9 @@ export interface Settings {
   neverSave: string[];
   /** Origins where the inline menu is off. */
   menuOff: string[];
+  /** Turn off Chrome's own offer to save passwords, so the two don't compete
+   *  (Chrome turns it back on when the extension is disabled or removed). */
+  replaceChrome: boolean;
   recipe: Recipe;
 }
 
@@ -97,6 +100,7 @@ export const DEFAULT_SETTINGS: Settings = {
   offerToSave: true,
   neverSave: [],
   menuOff: [],
+  replaceChrome: true,
   recipe: { kind: "apple" },
 };
 

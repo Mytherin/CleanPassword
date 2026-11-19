@@ -27,7 +27,8 @@
     "alarms",
     "idle",
     "webNavigation",
-    "contextMenus"
+    "contextMenus",
+    "privacy"
   ],
   "host_permissions": [
     "https://*.amazonaws.com/*"

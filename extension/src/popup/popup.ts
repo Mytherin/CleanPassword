@@ -547,6 +547,7 @@ async function settingsView(): Promise<void> {
     ),
     h("div", { class: "section" }, "Autofill"),
     h("div", { class: "form" }, toggle("Show suggestions in sign-in fields", "inlineMenu"), toggle("Offer to save passwords", "offerToSave"),
+      toggle("Turn off Chrome's own password manager", "replaceChrome"),
       exceptions ? h("button", { class: "link small", style: "align-self:flex-start", onclick: () => { save({ neverSave: [], menuOff: [] }); void settingsView(); } }, `Forget ${exceptions} site exception(s)`) : null),
     h("div", { class: "section" }, "Data"),
     h("div", { class: "card" },

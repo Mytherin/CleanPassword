@@ -58,6 +58,18 @@ async function settings(): Promise<Settings> {
   return { ...DEFAULT_SETTINGS, ...(settings ?? {}) };
 }
 
+/** Chrome's own password manager: off while CleanPassword replaces it, or
+ *  back to the user's choice in Chrome. Chrome itself undoes this when the
+ *  extension is disabled or removed. */
+async function applyReplaceChrome(): Promise<void> {
+  const pw = chrome.privacy?.services?.passwordSavingEnabled;
+  if (!pw) return;
+  try {
+    if ((await settings()).replaceChrome) await pw.set({ value: false });
+    else await pw.clear({});
+  } catch {}
+}
+
 async function becameUnlocked(s: core.Session): Promise<void> {
   session?.free();
   session = s;
@@ -723,6 +735,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "set-settings": {
       const s = { ...(await settings()), ...(msg.settings as Partial<Settings>) };
       await chrome.storage.local.set({ settings: s });
+      if ("replaceChrome" in (msg.settings as object)) await applyReplaceChrome();
       touch();
       return s;
     }
@@ -960,3 +973,4 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 void restore();
+void applyReplaceChrome();
