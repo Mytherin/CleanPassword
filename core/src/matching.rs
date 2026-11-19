@@ -59,11 +59,15 @@ pub fn parse_page(s: &str) -> Option<Page> {
     Some(Page { scheme: url.scheme().to_owned(), port: url.port_or_known_default(), domain, host, url: url.to_string() })
 }
 
-/// `www.example.co.uk` → `example.co.uk`.
+/// `www.example.co.uk` → `example.co.uk`; a host under one of the
+/// separate sites → that site (`signin.aws.amazon.com` → `aws.amazon.com`).
 pub fn registrable_domain(host: &str) -> String {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.starts_with('[') || host.parse::<std::net::IpAddr>().is_ok() {
         return host;
+    }
+    if let Some(site) = separate_sites().iter().filter(|s| host == **s || host.ends_with(&format!(".{s}"))).max_by_key(|s| s.len()) {
+        return site.clone();
     }
     match psl::domain_str(&host) {
         Some(d) => d.to_owned(),
@@ -150,6 +154,16 @@ struct Shared {
     from_to: Vec<(Vec<String>, Vec<String>)>,
 }
 
+/// Sites whose sign-ins are separate from the rest of their registrable
+/// domain (`aws.amazon.com` from `amazon.com`): `data/separate-sites.json`.
+fn separate_sites() -> &'static [String] {
+    static SITES: OnceLock<Vec<String>> = OnceLock::new();
+    SITES.get_or_init(|| {
+        let sites: Vec<String> = serde_json::from_str(include_str!("../data/separate-sites.json")).unwrap_or_default();
+        sites.into_iter().map(|s| s.trim().trim_end_matches('.').to_ascii_lowercase()).filter(|s| !s.is_empty()).collect()
+    })
+}
+
 fn shared() -> &'static Shared {
     static SHARED: OnceLock<Shared> = OnceLock::new();
     SHARED.get_or_init(|| {
@@ -213,6 +227,19 @@ mod tests {
         assert_eq!(q("https://example.com", None, "https://notexample.com/"), None);
         // github.io is a public suffix: users' sites are separate domains.
         assert_eq!(q("https://alice.github.io", None, "https://mallory.github.io/"), None);
+    }
+
+    #[test]
+    fn separate_sites() {
+        assert_eq!(registrable_domain("signin.aws.amazon.com"), "aws.amazon.com");
+        assert_eq!(registrable_domain("us-east-1.console.aws.amazon.com."), "aws.amazon.com");
+        assert_eq!(registrable_domain("AWS.Amazon.com"), "aws.amazon.com");
+        assert_eq!(registrable_domain("www.amazon.com"), "amazon.com");
+        assert_eq!(registrable_domain("notaws.amazon.com"), "amazon.com");
+        // An amazon.com login isn't offered on AWS, nor an AWS one on amazon.com.
+        assert_eq!(q("https://www.amazon.com", None, "https://signin.aws.amazon.com/signin"), None);
+        assert_eq!(q("https://signin.aws.amazon.com", None, "https://www.amazon.com/"), None);
+        assert_eq!(q("https://signin.aws.amazon.com", None, "https://us-east-1.console.aws.amazon.com/"), Some(Quality::Domain));
     }
 
     #[test]
