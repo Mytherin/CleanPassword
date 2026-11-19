@@ -217,7 +217,6 @@ pub struct SyncResult {
     pub uploaded: u64,
     pub removed: u64,
     pub merged: u64,
-    pub unreadable: u64,
     pub pending: u64,
     pub password_changed_elsewhere: bool,
 }
@@ -364,7 +363,6 @@ impl From<SyncReport> for SyncResult {
             uploaded: r.uploaded as u64,
             removed: r.removed as u64,
             merged: r.merged as u64,
-            unreadable: r.unreadable as u64,
             pending: r.pending as u64,
             password_changed_elsewhere: r.password_changed_elsewhere,
         }

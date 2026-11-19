@@ -1,5 +1,6 @@
 // Enough of S3 for the extension's tests: path-style objects with ETags,
-// conditional PUTs (If-Match / If-None-Match), DELETE and ListObjectsV2.
+// HEAD, conditional PUTs (If-Match / If-None-Match), DELETE and
+// ListObjectsV2.
 // Requests must be signed (an AWS4-HMAC-SHA256 Authorization header), but
 // signatures aren't checked.
 
@@ -35,6 +36,10 @@ export function startFakeS3() {
       if (req.method === "GET") {
         const o = objects.get(full);
         return o ? send(200, o.body, { etag: o.etag, "content-type": "application/octet-stream" }) : send(404, "<Error><Code>NoSuchKey</Code></Error>");
+      }
+      if (req.method === "HEAD") {
+        const o = objects.get(full);
+        return o ? send(200, "", { etag: o.etag }) : send(404);
       }
       if (req.method === "PUT") {
         const cur = objects.get(full);

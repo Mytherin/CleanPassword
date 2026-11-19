@@ -137,7 +137,7 @@ final class VaultStore: ObservableObject {
                 let r = try await Core.shared.run { try $0.sync() }
                 try await Core.shared.persist()
                 lastSync = Date()
-                syncMessage = r.unreadable > 0 ? "\(r.unreadable) item(s) in S3 couldn't be decrypted." : nil
+                syncMessage = nil
                 if r.passwordChangedElsewhere {
                     notice = "The master password was changed on another device. Use the new one from now on."
                 }

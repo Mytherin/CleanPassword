@@ -1,95 +1,136 @@
 //! Syncing a vault with its S3 folder.
 //!
+//! The folder holds two objects: `vault.json` (the header: what unlocking
+//! needs) and `vault.bin` (every item, sealed in one object; a vault of a
+//! thousand passwords is a megabyte or two).
+//!
 //! - `vault.json` comes first: if it's another vault's, nothing happens
 //!   ([`Error::DifferentVault`]); if another device changed the master
 //!   password, this device adopts the new header (the vault key stays the
 //!   same, so items stay readable) and the new password unlocks from then
 //!   on.
-//! - The folder is listed, and only items whose ETag changed are
-//!   downloaded. An item changed here and elsewhere is merged field by
-//!   field ([`crate::item::merge`]); no password is lost.
-//! - Items changed here are uploaded with `If-Match` (or `If-None-Match: *`
-//!   if new). If S3 refuses because the item changed meanwhile, it's
-//!   downloaded, merged and tried again.
-//! - Deleting for good leaves a *tombstone* (an encrypted marker) so other
-//!   devices delete it too; an edit made elsewhere beats a delete. Tombstones
-//!   are removed after 30 days.
-//! - Objects that can't be decrypted (another key, damaged) are left alone
-//!   and counted, never deleted.
+//! - A `HEAD` of `vault.bin` tells whether another device saved since this
+//!   one last synced. If so it's downloaded and merged with what changed
+//!   here, item by item, starting from the copy this device last synced
+//!   ([`merge_vault`]): an item changed on one side takes that side's
+//!   version; changed on both, it's merged field by field
+//!   ([`crate::item::merge`]), so no password is lost; deleted on one side
+//!   and edited on the other, the edit wins.
+//! - The result is uploaded with `If-Match` (`If-None-Match: *` for the
+//!   first upload). If S3 refuses because another device saved meanwhile,
+//!   the merge is done again on top of that.
+//! - A `vault.bin` that can't be decrypted stops the sync (it's never
+//!   overwritten); one that's missing is put back, never taken to mean
+//!   every item was deleted.
 
-use chrono::{DateTime, Duration, Utc};
+use std::collections::{BTreeMap, BTreeSet};
+
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::crypto;
 use crate::item::{merge, Item};
 use crate::s3::{Client, Cond, Put, Transport};
-use crate::vault::{AwsCredentials, Gone, ItemState, S3Config, Vault, VaultHeader, TRASH_DAYS};
+use crate::vault::{AwsCredentials, S3Config, Vault, VaultHeader};
 use crate::{Error, Result};
 
 pub const HEADER_OBJECT: &str = "vault.json";
-pub const ITEMS_PREFIX: &str = "items/";
-/// Sealed objects start with this, then `nonce ‖ ciphertext ‖ tag`.
-const MAGIC: &[u8] = b"CPV1";
-/// Item plaintexts are padded to a multiple of this many bytes.
-const PAD: usize = 512;
-/// Uploads retried after merging with a concurrent change.
-const RETRIES: usize = 3;
+pub const VAULT_OBJECT: &str = "vault.bin";
+/// The sealed vault starts with this, then `nonce ‖ ciphertext ‖ tag`.
+const MAGIC: &[u8] = b"CPV2";
+/// The vault's plaintext is padded to a multiple of this many bytes, or of
+/// an eighth of its size rounded up to a power of two if that's more: S3
+/// sees roughly how big the vault is, not how many items it holds.
+const PAD: usize = 16 * 1024;
+/// Uploads retried after merging with another device's save.
+const RETRIES: usize = 4;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncReport {
+    /// Items added or changed here because they were elsewhere.
     pub downloaded: usize,
+    /// Items changed here (or deleted here for good) that were uploaded.
     pub uploaded: usize,
     /// Deleted here because they were deleted elsewhere.
     pub removed: usize,
     /// Changed both here and elsewhere, and merged.
     pub merged: usize,
-    /// Objects in the folder that couldn't be decrypted (left alone).
-    pub unreadable: usize,
     /// Changes that couldn't be uploaded this time (tried again next sync).
     pub pending: usize,
     /// The master password was changed on another device.
     pub password_changed_elsewhere: bool,
 }
 
-/// What an item object holds.
+/// What `vault.bin` holds.
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Stored {
-    Item(Box<Item>),
-    Tombstone { id: String, at: DateTime<Utc> },
+struct Stored {
+    items: Vec<Item>,
 }
 
-fn item_name(id: &str) -> String {
-    format!("{ITEMS_PREFIX}{id}.bin")
+fn vault_aad(vault_id: &str) -> Vec<u8> {
+    format!("cleanpassword/vault/v2/{vault_id}").into_bytes()
 }
 
-/// The id from an item object's name, if it's one of ours.
-fn item_id(name: &str) -> Option<&str> {
-    let id = name.strip_prefix(ITEMS_PREFIX)?.strip_suffix(".bin")?;
-    (!id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then_some(id)
+fn pad_block(len: usize) -> usize {
+    PAD.max(len.next_power_of_two() / 8)
 }
 
-fn item_aad(vault_id: &str, id: &str) -> Vec<u8> {
-    format!("cleanpassword/item/v1/{vault_id}/{id}").into_bytes()
-}
-
-fn seal_object(key: &[u8; 32], vault_id: &str, id: &str, stored: &Stored) -> Vec<u8> {
-    let plain = Zeroizing::new(crypto::pad(serde_json::to_vec(stored).expect("items serialize"), PAD));
+fn seal_vault(key: &[u8; 32], vault_id: &str, items: &BTreeMap<String, Item>) -> Vec<u8> {
+    let stored = Stored { items: items.values().cloned().collect() };
+    let json = Zeroizing::new(serde_json::to_vec(&stored).expect("items serialize"));
+    let plain = Zeroizing::new(crypto::pad(json.to_vec(), pad_block(json.len())));
     let mut out = MAGIC.to_vec();
-    out.extend(crypto::seal(key, &item_aad(vault_id, id), &plain));
+    out.extend(crypto::seal(key, &vault_aad(vault_id), &plain));
     out
 }
 
-fn open_object(key: &[u8; 32], vault_id: &str, id: &str, data: &[u8]) -> Option<Stored> {
-    let plain = crypto::open(key, &item_aad(vault_id, id), data.strip_prefix(MAGIC)?)?;
-    let stored: Stored = serde_json::from_slice(&plain).ok()?;
-    // The id inside must be the one in the name (the AAD binds them too).
-    let inner = match &stored {
-        Stored::Item(i) => &i.id,
-        Stored::Tombstone { id, .. } => id,
-    };
-    (inner == id).then_some(stored)
+fn open_vault(key: &[u8; 32], vault_id: &str, data: &[u8]) -> Result<BTreeMap<String, Item>> {
+    let unreadable = || Error::invalid("the vault in S3 (vault.bin) can't be decrypted: it's damaged, or was written with another key");
+    let plain = crypto::open(key, &vault_aad(vault_id), data.strip_prefix(MAGIC).ok_or_else(unreadable)?).ok_or_else(unreadable)?;
+    let stored: Stored = serde_json::from_slice(&plain).map_err(|_| unreadable())?;
+    Ok(stored.items.into_iter().map(|i| (i.id.clone(), i)).collect())
+}
+
+/// Three-way merge of the vault, item by item: `base` is what this device
+/// last synced, `local` what it has now, `remote` what's in S3. Adds the ids
+/// merged from both sides to `merged`.
+fn merge_vault(
+    base: &BTreeMap<String, Item>,
+    local: &BTreeMap<String, Item>,
+    remote: &BTreeMap<String, Item>,
+    merged: &mut BTreeSet<String>,
+) -> BTreeMap<String, Item> {
+    let ids: BTreeSet<&String> = base.keys().chain(local.keys()).chain(remote.keys()).collect();
+    let mut out = BTreeMap::new();
+    for id in ids {
+        let (b, l, r) = (base.get(id), local.get(id), remote.get(id));
+        let pick = if l == r || r == b {
+            // The same on both sides, or changed only here.
+            l.cloned()
+        } else if l == b {
+            // Changed (or deleted) only there.
+            r.cloned()
+        } else {
+            match (l, r) {
+                (Some(l), Some(r)) => {
+                    merged.insert(id.clone());
+                    Some(merge(b, l, r))
+                }
+                // Deleted on one side, edited on the other: the edit wins.
+                (l, r) => l.or(r).cloned(),
+            }
+        };
+        if let Some(item) = pick {
+            out.insert(id.clone(), item);
+        }
+    }
+    out
+}
+
+/// How many items differ between two versions of the vault.
+fn changed(a: &BTreeMap<String, Item>, b: &BTreeMap<String, Item>) -> usize {
+    a.keys().chain(b.keys()).collect::<BTreeSet<_>>().into_iter().filter(|id| a.get(*id) != b.get(*id)).count()
 }
 
 /// `vault.json` and its ETag, if the folder holds a vault.
@@ -111,9 +152,9 @@ impl Vault {
         self.sync_with_progress(transport, &mut |_, _| {}).await
     }
 
-    /// [`Vault::sync`], telling `progress(done, total)` how many of the
-    /// items to download have come so far (first with `done` 0, and only when
-    /// there are some: on joining a vault, all of them).
+    /// [`Vault::sync`], telling `progress(done, total)` how the download
+    /// of another device's save is going (`(0, 1)` before, `(1, 1)` after;
+    /// nothing if there's none to download).
     pub async fn sync_with_progress<T: Transport>(&mut self, transport: &T, progress: &mut dyn FnMut(usize, usize)) -> Result<SyncReport> {
         let location = self.config.location();
         let credentials = self.s.credentials.for_client();
@@ -122,9 +163,7 @@ impl Vault {
 
         self.sync_header(&client, &mut report).await?;
         self.empty_old_trash(Utc::now());
-        self.pull(&client, &mut report, progress).await?;
-        self.push(&client, &mut report).await?;
-        self.clean_tombstones(&client).await;
+        self.sync_items(&client, &mut report, progress).await?;
 
         self.last_sync = Some(Utc::now());
         Ok(report)
@@ -136,12 +175,7 @@ impl Vault {
             None => {
                 if self.s.header_etag.is_some() {
                     // The folder was emptied: put everything back.
-                    for st in self.s.items.values_mut() {
-                        st.etag = None;
-                        st.dirty = true;
-                    }
-                    self.s.purges.clear();
-                    self.s.tombstones.clear();
+                    self.s.etag = None;
                 }
                 let body = serde_json::to_vec_pretty(&self.header).expect("header serializes");
                 match client.put(HEADER_OBJECT, body, Cond::Absent).await? {
@@ -181,173 +215,73 @@ impl Vault {
         Ok(())
     }
 
-    async fn pull<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport, progress: &mut dyn FnMut(usize, usize)) -> Result<()> {
-        let listed = client.list(ITEMS_PREFIX).await?;
-        let mut present = std::collections::HashSet::new();
-        let mut todo = Vec::new();
-        for l in &listed {
-            let Some(id) = item_id(&l.name) else { continue };
-            present.insert(id.to_owned());
-            let known = self.s.items.get(id).and_then(|s| s.etag.as_deref()) == Some(l.etag.as_str())
-                || self.s.tombstones.get(id).and_then(|g| g.etag.as_deref()) == Some(l.etag.as_str())
-                || self.s.purges.contains_key(id);
-            if !known {
-                todo.push((l.name.as_str(), id));
-            }
-        }
-        if !todo.is_empty() {
-            progress(0, todo.len());
-        }
-        for (n, &(name, id)) in todo.iter().enumerate() {
-            if let Some(obj) = client.get(name).await? {
-                match open_object(&self.key, &self.header.vault_id, id, &obj.data) {
-                    None => report.unreadable += 1,
-                    Some(stored) => self.take_remote(id, stored, obj.etag, report),
-                }
-            }
-            progress(n + 1, todo.len());
-        }
-        // Gone from S3 altogether (a tombstone cleaned up, or deleted by
-        // hand): delete here too, unless changed here.
-        let vanished: Vec<String> = self.s.items.iter().filter(|(id, s)| s.etag.is_some() && !present.contains(*id)).map(|(id, _)| id.clone()).collect();
-        for id in vanished {
-            let st = self.s.items.get_mut(&id).expect("listed above");
-            if st.dirty {
-                st.etag = None;
-            } else {
-                self.s.items.remove(&id);
-                report.removed += 1;
-            }
-        }
-        self.s.tombstones.retain(|id, _| present.contains(id));
-        Ok(())
-    }
-
-    /// Takes in what another device saved.
-    fn take_remote(&mut self, id: &str, stored: Stored, etag: String, report: &mut SyncReport) {
-        match stored {
-            Stored::Item(remote) => {
-                let remote = *remote;
-                match self.s.items.get_mut(id) {
-                    None => {
-                        self.s.items.insert(id.to_owned(), ItemState { item: remote.clone(), base: Some(remote), etag: Some(etag), dirty: false });
-                        report.downloaded += 1;
-                    }
-                    Some(st) if !st.dirty => {
-                        st.item = remote.clone();
-                        st.base = Some(remote);
-                        st.etag = Some(etag);
-                        report.downloaded += 1;
-                    }
-                    Some(st) => {
-                        st.item = merge(st.base.as_ref(), &st.item, &remote);
-                        st.dirty = st.item != remote;
-                        st.base = Some(remote);
-                        st.etag = Some(etag);
-                        report.merged += 1;
+    async fn sync_items<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport, progress: &mut dyn FnMut(usize, usize)) -> Result<()> {
+        let before = self.s.items.clone();
+        let mut merged = BTreeSet::new();
+        let mut done = false;
+        for _ in 0..RETRIES {
+            // What's in S3 now, and its ETag (`None`: there's no vault.bin).
+            // Unchanged since the last sync, it's the synced copy.
+            let (remote, etag) = match client.head(VAULT_OBJECT).await? {
+                Some(e) if self.s.etag.as_ref() == Some(&e) => (self.s.base.clone(), Some(e)),
+                Some(_) => {
+                    progress(0, 1);
+                    let obj = client.get(VAULT_OBJECT).await?;
+                    progress(1, 1);
+                    match obj {
+                        Some(obj) => (open_vault(&self.key, &self.header.vault_id, &obj.data)?, Some(obj.etag)),
+                        None => (self.s.base.clone(), None),
                     }
                 }
+                None => (self.s.base.clone(), None),
+            };
+            self.s.items = merge_vault(&self.s.base, &self.s.items, &remote, &mut merged);
+            self.s.base = remote;
+            self.s.etag = etag.clone();
+            if etag.is_some() && self.s.items == self.s.base {
+                done = true;
+                break;
             }
-            Stored::Tombstone { at, .. } => {
-                self.s.tombstones.insert(id.to_owned(), Gone { etag: Some(etag.clone()), at });
-                match self.s.items.get_mut(id) {
-                    // Edited here: the edit wins, overwriting the tombstone.
-                    Some(st) if st.dirty => st.etag = Some(etag),
-                    Some(_) => {
-                        self.s.items.remove(id);
-                        report.removed += 1;
-                    }
-                    None => {}
-                }
-            }
-        }
-    }
-
-    async fn push<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport) -> Result<()> {
-        let vault_id = self.header.vault_id.clone();
-        let dirty: Vec<String> = self.s.items.iter().filter(|(_, s)| s.dirty).map(|(id, _)| id.clone()).collect();
-        for id in dirty {
-            let mut done = false;
-            for _ in 0..RETRIES {
-                let Some(st) = self.s.items.get(&id) else { break };
-                let body = seal_object(&self.key, &vault_id, &id, &Stored::Item(Box::new(st.item.clone())));
-                let etag = st.etag.clone();
-                let cond = etag.as_deref().map(Cond::Match).unwrap_or(Cond::Absent);
-                match client.put(&item_name(&id), body, cond).await? {
-                    Put::Stored { etag } => {
-                        let st = self.s.items.get_mut(&id).expect("still there");
-                        st.etag = Some(etag);
-                        st.base = Some(st.item.clone());
-                        st.dirty = false;
-                        self.s.tombstones.remove(&id);
-                        report.uploaded += 1;
-                        done = true;
-                        break;
-                    }
-                    Put::Conflict => match client.get(&item_name(&id)).await? {
-                        None => self.s.items.get_mut(&id).expect("still there").etag = None,
-                        Some(obj) => match open_object(&self.key, &vault_id, &id, &obj.data) {
-                            Some(stored) => self.take_remote(&id, stored, obj.etag, report),
-                            None => break,
-                        },
-                    },
-                }
-                if self.s.items.get(&id).is_none_or(|s| !s.dirty) {
+            let body = seal_vault(&self.key, &self.header.vault_id, &self.s.items);
+            let cond = etag.as_deref().map_or(Cond::Absent, Cond::Match);
+            match client.put(VAULT_OBJECT, body, cond).await? {
+                Put::Stored { etag } => {
+                    report.uploaded += changed(&self.s.base, &self.s.items);
+                    self.s.base = self.s.items.clone();
+                    self.s.etag = Some(etag);
                     done = true;
                     break;
                 }
-            }
-            if !done {
-                report.pending += 1;
+                // Another device saved meanwhile: merge with that.
+                Put::Conflict => {}
             }
         }
-
-        let purges: Vec<(String, Gone)> = self.s.purges.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        for (id, gone) in purges {
-            let Some(etag) = gone.etag.as_deref() else {
-                self.s.purges.remove(&id);
-                continue;
-            };
-            let body = seal_object(&self.key, &vault_id, &id, &Stored::Tombstone { id: id.clone(), at: gone.at });
-            match client.put(&item_name(&id), body, Cond::Match(etag)).await? {
-                Put::Stored { etag } => {
-                    self.s.purges.remove(&id);
-                    self.s.tombstones.insert(id, Gone { etag: Some(etag), at: gone.at });
-                }
-                Put::Conflict => {
-                    // Changed elsewhere since: that edit beats the delete.
-                    self.s.purges.remove(&id);
-                    if let Some(obj) = client.get(&item_name(&id)).await? {
-                        if let Some(stored) = open_object(&self.key, &vault_id, &id, &obj.data) {
-                            self.take_remote(&id, stored, obj.etag, report);
-                        }
-                    }
-                }
+        if !done {
+            report.pending = changed(&self.s.base, &self.s.items);
+        }
+        report.merged = merged.len();
+        for id in before.keys().chain(self.s.items.keys()).collect::<BTreeSet<_>>() {
+            match (before.get(id), self.s.items.get(id)) {
+                (Some(_), None) => report.removed += 1,
+                (b, Some(i)) if b != Some(i) && !merged.contains(id) => report.downloaded += 1,
+                _ => {}
             }
         }
         Ok(())
-    }
-
-    /// Removes tombstones every device has had [`TRASH_DAYS`] to see.
-    async fn clean_tombstones<T: Transport>(&mut self, client: &Client<'_, T>) {
-        let cutoff = Utc::now() - Duration::days(TRASH_DAYS);
-        let old: Vec<String> = self.s.tombstones.iter().filter(|(_, g)| g.at < cutoff).map(|(id, _)| id.clone()).collect();
-        for id in old {
-            if client.delete(&item_name(&id)).await.is_ok() {
-                self.s.tombstones.remove(&id);
-            }
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use pollster::block_on;
 
     use super::*;
     use crate::item::ItemData;
-    use cleanbucket::fake::FakeS3;
+    use crate::s3::{HttpRequest, HttpResponse};
     use crate::vault::tests::{config, creds, login, PW};
+    use cleanbucket::fake::FakeS3;
 
     fn join(s3: &FakeS3) -> Vault {
         let (h, etag) = block_on(fetch_header(s3, &config(), &creds())).unwrap().expect("a vault");
@@ -365,6 +299,10 @@ mod tests {
         (s3, a, b)
     }
 
+    fn vault_bin(s3: &FakeS3) -> Vec<u8> {
+        s3.objects.borrow()[&format!("Vault/{VAULT_OBJECT}")].0.clone()
+    }
+
     #[test]
     fn two_devices_share_items() {
         let (s3, mut a, mut b) = setup();
@@ -375,31 +313,48 @@ mod tests {
         assert_eq!(r.uploaded, 3);
         assert!(!a.has_unsynced_changes());
         let r = block_on(b.sync(&s3)).unwrap();
-        assert_eq!(r.downloaded, 3, "paged listing included");
+        assert_eq!(r.downloaded, 3);
         assert_eq!(b.get(&id).unwrap().password, "pw1");
-        // Nothing changed: nothing downloaded again.
-        assert_eq!(block_on(b.sync(&s3)).unwrap(), SyncReport::default());
 
-        // A device joining now hears of each download.
+        // Nothing changed: nothing downloaded or uploaded.
+        s3.requests.borrow_mut().clear();
+        assert_eq!(block_on(b.sync(&s3)).unwrap(), SyncReport::default());
+        let requests = s3.requests.borrow().clone();
+        assert!(requests.iter().all(|r| !r.starts_with("PUT") && *r != format!("GET Vault/{VAULT_OBJECT}")), "{requests:?}");
+
+        // A device joining now hears of the download; then there's none.
         let mut c = {
             let (h, etag) = block_on(fetch_header(&s3, &config(), &creds())).unwrap().unwrap();
             Vault::join(config(), creds(), h, etag, PW).unwrap()
         };
         let mut seen = Vec::new();
         block_on(c.sync_with_progress(&s3, &mut |done, total| seen.push((done, total)))).unwrap();
-        assert_eq!(seen, [(0, 3), (1, 3), (2, 3), (3, 3)]);
+        assert_eq!(seen, [(0, 1), (1, 1)]);
+        assert_eq!(c.items().len(), 3);
         let mut seen = Vec::new();
         block_on(c.sync_with_progress(&s3, &mut |done, total| seen.push((done, total)))).unwrap();
         assert!(seen.is_empty(), "nothing to download: no progress");
 
-        // Nothing readable in the bucket.
-        for (k, (data, _)) in s3.objects.borrow().iter() {
+        // Nothing readable in the bucket, and just the two objects.
+        let objects = s3.objects.borrow();
+        assert_eq!(objects.keys().collect::<Vec<_>>(), ["Vault/vault.bin", "Vault/vault.json"]);
+        for (k, (data, _)) in objects.iter() {
             let text = String::from_utf8_lossy(data);
             assert!(!text.contains("Example") && !text.contains("pw1") && !text.contains("example.com"), "{k}");
-            if k.starts_with("Vault/items/") {
-                assert_eq!((data.len() - MAGIC.len() - 24 - 16) % PAD, 0, "padded");
-            }
         }
+    }
+
+    #[test]
+    fn the_vault_is_padded() {
+        let (s3, mut a, _) = setup();
+        let overhead = MAGIC.len() + 24 + 16;
+        assert_eq!(vault_bin(&s3).len() - overhead, PAD, "an empty vault");
+        for i in 0..20 {
+            a.add(login(&format!("Site {i}"), &format!("https://site{i}.com"), "me", "pw")).unwrap();
+        }
+        block_on(a.sync(&s3)).unwrap();
+        assert_eq!(vault_bin(&s3).len() - overhead, PAD, "twenty items look the same");
+        assert_eq!(pad_block(1 << 20), 128 * 1024, "a large vault grows in eighths");
     }
 
     #[test]
@@ -419,6 +374,24 @@ mod tests {
         for v in [&a, &b] {
             let i = v.get(&id).unwrap();
             assert_eq!((i.notes.as_str(), i.username.as_str()), ("from a", "me@b"));
+        }
+    }
+
+    #[test]
+    fn edits_to_different_items_both_arrive() {
+        let (s3, mut a, mut b) = setup();
+        let x = a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+        a.update(&x, ItemData { notes: "a".into(), ..a.get(&x).unwrap().data() }).unwrap();
+        let y = b.add(login("Y", "https://y.com", "me", "2")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        let r = block_on(b.sync(&s3)).unwrap();
+        assert_eq!((r.downloaded, r.uploaded, r.merged), (1, 1, 0));
+        block_on(a.sync(&s3)).unwrap();
+        for v in [&a, &b] {
+            assert_eq!(v.get(&x).unwrap().notes, "a");
+            assert!(v.get(&y).is_some());
         }
     }
 
@@ -455,7 +428,7 @@ mod tests {
         block_on(b.sync(&s3)).unwrap();
         assert!(b.get(&x).unwrap().deleted.is_some());
 
-        // Purge: a tombstone; b deletes it too.
+        // Deleted for good: gone on b too.
         a.purge(&x).unwrap();
         block_on(a.sync(&s3)).unwrap();
         let r = block_on(b.sync(&s3)).unwrap();
@@ -471,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_beats_a_tombstone_already_uploaded() {
+    fn edit_beats_a_purge_already_uploaded() {
         let (s3, mut a, mut b) = setup();
         let y = a.add(login("Y", "https://y.com", "me", "2")).unwrap();
         block_on(a.sync(&s3)).unwrap();
@@ -483,6 +456,42 @@ mod tests {
         assert_eq!(b.get(&y).unwrap().notes, "edited offline");
         block_on(a.sync(&s3)).unwrap();
         assert_eq!(a.get(&y).unwrap().notes, "edited offline");
+    }
+
+    /// A transport that lets another device sync just before this one's
+    /// first upload of `vault.bin`, as if both saved at the same moment.
+    struct Racing<'a> {
+        s3: &'a FakeS3,
+        other: RefCell<Option<Vault>>,
+    }
+
+    impl Transport for Racing<'_> {
+        async fn send(&self, req: HttpRequest) -> std::result::Result<HttpResponse, String> {
+            if req.method == "PUT" && req.url.ends_with(VAULT_OBJECT) {
+                let other = self.other.borrow_mut().take();
+                if let Some(mut other) = other {
+                    block_on(other.sync(self.s3)).unwrap();
+                }
+            }
+            self.s3.send(req).await
+        }
+    }
+
+    #[test]
+    fn a_save_refused_as_outdated_is_merged_and_retried() {
+        let (s3, mut a, mut b) = setup();
+        let x = a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+        a.update(&x, ItemData { notes: "from a".into(), ..a.get(&x).unwrap().data() }).unwrap();
+        let y = b.add(login("Y", "https://y.com", "me", "2")).unwrap();
+        let racing = Racing { s3: &s3, other: RefCell::new(Some(b)) };
+        let r = block_on(a.sync(&racing)).unwrap();
+        assert_eq!((r.uploaded, r.downloaded, r.pending), (1, 1, 0));
+        assert!(a.get(&y).is_some());
+        let c = join(&s3);
+        assert_eq!(c.get(&x).unwrap().notes, "from a");
+        assert!(c.get(&y).is_some());
     }
 
     #[test]
@@ -512,18 +521,31 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_objects_are_left_alone() {
-        let (s3, mut a, _) = setup();
-        s3.objects.borrow_mut().insert("Vault/items/abc.bin".into(), (b"CPV1garbage-garbage-garbage-garbage-garbage".to_vec(), "\"x\"".into()));
-        let r = block_on(a.sync(&s3)).unwrap();
-        assert_eq!(r.unreadable, 1);
-        assert!(s3.objects.borrow().contains_key("Vault/items/abc.bin"));
-        // An object copied under another item's name doesn't open either.
-        let id = a.add(login("X", "https://x.com", "me", "1")).unwrap();
+    fn a_vault_from_an_older_version_is_refused() {
+        let s3 = FakeS3::new();
+        let mut a = Vault::create(config(), creds(), PW).unwrap();
         block_on(a.sync(&s3)).unwrap();
-        let data = s3.objects.borrow()[&format!("Vault/items/{id}.bin")].0.clone();
-        s3.objects.borrow_mut().insert("Vault/items/other.bin".into(), (data, "\"y\"".into()));
-        assert_eq!(block_on(a.sync(&s3)).unwrap().unreadable, 2);
+        let key = "Vault/vault.json".to_owned();
+        let mut header: serde_json::Value = serde_json::from_slice(&s3.objects.borrow()[&key].0).unwrap();
+        header["version"] = 1.into();
+        s3.insert(&key, serde_json::to_vec(&header).unwrap());
+        let e = block_on(fetch_header(&s3, &config(), &creds())).unwrap_err();
+        assert!(e.to_string().contains("older version"), "{e}");
+        assert!(block_on(a.sync(&s3)).is_err());
+    }
+
+    #[test]
+    fn an_unreadable_vault_is_never_overwritten() {
+        let (s3, mut a, _) = setup();
+        let x = a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        let garbage = b"CPV2garbage-garbage-garbage-garbage-garbage".to_vec();
+        s3.insert(&format!("Vault/{VAULT_OBJECT}"), garbage.clone());
+        a.update(&x, ItemData { notes: "here".into(), ..a.get(&x).unwrap().data() }).unwrap();
+        assert!(block_on(a.sync(&s3)).is_err());
+        assert_eq!(vault_bin(&s3), garbage);
+        assert_eq!(a.get(&x).unwrap().notes, "here", "kept here");
+        assert!(a.has_unsynced_changes());
     }
 
     #[test]
@@ -543,105 +565,64 @@ mod tests {
 
     #[test]
     fn emptied_folder_is_restored() {
-        let (s3, mut a, _) = setup();
+        let (s3, mut a, mut b) = setup();
         a.add(login("X", "https://x.com", "me", "1")).unwrap();
         block_on(a.sync(&s3)).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+        // Only vault.bin gone: not taken to mean every item was deleted.
+        s3.objects.borrow_mut().remove(&format!("Vault/{VAULT_OBJECT}"));
+        block_on(b.sync(&s3)).unwrap();
+        assert_eq!(b.items().len(), 1);
+        // Everything gone.
         s3.objects.borrow_mut().clear();
         block_on(a.sync(&s3)).unwrap();
-        let b = join(&s3);
-        assert_eq!(b.items().len(), 1);
-    }
-
-    /// A vault written before the S3 client and sealing moved to the shared
-    /// `cleanbucket` crate (testdata/, written by a0d74c6): the device's
-    /// saved copy unlocks, another device joins from its S3 objects, both
-    /// read the same item and passkey, and nothing is re-downloaded.
-    #[test]
-    fn opens_vaults_written_before_cleanbucket() {
-        use base64::Engine;
-        let fixture = include_str!("../testdata/vault-before-cleanbucket.txt");
-        let line = |tag: &str| fixture.lines().find_map(|l| l.strip_prefix(&format!("{tag}="))).expect("fixture line").trim().to_owned();
-        let s3 = FakeS3::new();
-        for l in fixture.lines().filter_map(|l| l.strip_prefix("OBJ=")) {
-            let mut parts = l.trim().splitn(3, '|');
-            let (key, etag, data) = (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
-            let data = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
-            s3.objects.borrow_mut().insert(key.to_owned(), (data, etag.to_owned()));
-        }
-        let id = line("ITEM");
-
-        // The device that wrote it.
-        let mut a = Vault::unlock(&line("SAVED"), PW).unwrap();
-        assert_eq!(a.get(&id).unwrap().password, "fixture-password-1");
-        assert_eq!(block_on(a.sync(&s3)).unwrap(), SyncReport::default(), "nothing new");
-
-        // A new device, from S3.
-        let mut b = join(&s3);
-        let item = b.get(&id).expect("downloaded").clone();
-        assert_eq!(item.password, "fixture-password-1");
-        assert_eq!(item.passkeys.len(), 1);
-        let cred = crate::passkey::unb64(&line("CRED")).unwrap();
-        let s = b.assert_passkey(&id, &cred, "example.com", &[5; 32]).unwrap();
-        use p256::ecdsa::signature::Verifier;
-        use p256::pkcs8::DecodePublicKey;
-        let vk = p256::ecdsa::VerifyingKey::from_public_key_der(&crate::passkey::unb64(&line("PUB")).unwrap()).unwrap();
-        let mut signed = s.authenticator_data.clone();
-        signed.extend_from_slice(&[5; 32]);
-        vk.verify(&signed, &p256::ecdsa::Signature::from_der(&s.signature).unwrap()).unwrap();
-
-        // And what's written now, the old format reads (sealed alike).
-        b.update(&id, ItemData { notes: "after".into(), ..item.data() }).unwrap();
-        block_on(b.sync(&s3)).unwrap();
-        block_on(a.sync(&s3)).unwrap();
-        assert_eq!(a.get(&id).unwrap().notes, "after");
+        let c = join(&s3);
+        assert_eq!(c.items().len(), 1);
     }
 
     /// CleanNotes can use the same folder: its objects (head, notes/,
-    /// folders/, attachments/, encryption.json) are neither read, counted
-    /// as unreadable, nor touched; and CleanPassword's own stay out of
-    /// CleanNotes' way (vault.json and items/ are names it doesn't use).
+    /// folders/, attachments/, encryption.json) are neither read nor
+    /// touched; and CleanPassword's own stay out of CleanNotes' way
+    /// (vault.json and vault.bin are names it doesn't use).
     #[test]
     fn shares_a_folder_with_cleannotes() {
         let s3 = FakeS3::new();
-        let notes = [
-            "Vault/head",
-            "Vault/encryption.json",
-            "Vault/notes/abc.md",
-            "Vault/notes/def.md",
-            "Vault/folders/f1.json",
-            "Vault/attachments/0123abcd.png",
-        ];
+        let notes = ["Vault/head", "Vault/encryption.json", "Vault/notes/abc.md", "Vault/folders/f1.json", "Vault/attachments/0123abcd.png"];
         for k in notes {
             s3.objects.borrow_mut().insert(k.into(), (b"CleanNotes data".to_vec(), format!("\"{k}\"")));
         }
         let mut a = Vault::create(config(), creds(), PW).unwrap();
-        a.add(login("X", "https://x.com", "me", "1")).unwrap();
-        let r = block_on(a.sync(&s3)).unwrap();
-        assert_eq!((r.uploaded, r.unreadable), (1, 0));
-        let mut b = join(&s3);
+        let x = a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        assert_eq!(block_on(a.sync(&s3)).unwrap().uploaded, 1);
+        let b = join(&s3);
         assert_eq!(b.items().len(), 1);
-        a.purge(&a.items()[0].id.clone()).unwrap();
+        a.purge(&x).unwrap();
         block_on(a.sync(&s3)).unwrap();
-        a.s.tombstones.values_mut().for_each(|g| g.at = Utc::now() - Duration::days(31));
-        block_on(a.sync(&s3)).unwrap();
-        assert_eq!(block_on(b.sync(&s3)).unwrap().unreadable, 0);
         let objects = s3.objects.borrow();
         for k in notes {
             assert_eq!(objects[k], (b"CleanNotes data".to_vec(), format!("\"{k}\"")), "{k} untouched");
         }
-        assert!(objects.keys().all(|k| notes.contains(&k.as_str()) || k == "Vault/vault.json" || k.starts_with("Vault/items/")));
+        assert!(objects.keys().all(|k| notes.contains(&k.as_str()) || k == "Vault/vault.json" || k == "Vault/vault.bin"));
     }
 
     #[test]
-    fn old_tombstones_are_cleaned_up() {
-        let (s3, mut a, _) = setup();
-        let x = a.add(login("X", "https://x.com", "me", "1")).unwrap();
-        block_on(a.sync(&s3)).unwrap();
-        a.purge(&x).unwrap();
-        block_on(a.sync(&s3)).unwrap();
-        assert!(s3.objects.borrow().contains_key(&format!("Vault/items/{x}.bin")));
-        a.s.tombstones.get_mut(&x).unwrap().at = Utc::now() - Duration::days(31);
-        block_on(a.sync(&s3)).unwrap();
-        assert!(!s3.objects.borrow().contains_key(&format!("Vault/items/{x}.bin")));
+    fn merging_the_vault() {
+        let item = |id: &str, notes: &str| {
+            let mut i = Item::new(ItemData { notes: notes.into(), ..login(id, "https://x.com", "me", "1") }, Utc::now());
+            i.id = id.into();
+            i
+        };
+        let (kept, gone_there, gone_here, both, new_here, new_there) =
+            (item("kept", ""), item("gone-there", ""), item("gone-here", ""), item("both", ""), item("new-here", ""), item("new-there", ""));
+        let edited = Item { notes: "edited here".into(), ..gone_there.clone() };
+        let map = |items: &[&Item]| items.iter().map(|i| (i.id.clone(), (*i).clone())).collect::<BTreeMap<_, _>>();
+        let base = map(&[&kept, &gone_there, &gone_here, &both]);
+        let local = map(&[&kept, &edited, &both, &new_here]);
+        let remote = map(&[&kept, &gone_here, &both, &new_there]);
+        let mut merged = BTreeSet::new();
+        let out = merge_vault(&base, &local, &remote, &mut merged);
+        assert_eq!(out.keys().map(String::as_str).collect::<Vec<_>>(), ["both", "gone-there", "kept", "new-here", "new-there"]);
+        assert_eq!(out["gone-there"].notes, "edited here", "an edit beats a delete");
+        assert!(merged.is_empty());
     }
 }
