@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The Passwords screen, as in Apple's Passwords app: tiles for All, Codes,
-/// Security and Deleted with their counts, then the folders; search across
+/// The Passwords screen, as in Apple's Passwords app: tiles for All,
+/// Passkeys, Codes, Security and Deleted with their counts, then the folders; search across
 /// every item; the "…" menu (Settings, Generator, Lock Now) on top and New
 /// Password in the bottom toolbar.
 struct PasswordsView: View {
@@ -58,6 +58,7 @@ struct PasswordsView: View {
             Section {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                     tile(.all, count: store.items.count)
+                    tile(.passkeys, count: store.items.filter { !$0.passkeys.isEmpty }.count)
                     tile(.codes, count: store.items.filter { !$0.fields.totp.isEmpty }.count)
                     tile(.security, count: store.findings.count)
                     tile(.deleted, count: store.trash.count)

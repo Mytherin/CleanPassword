@@ -13,8 +13,10 @@
 //!   most other password managers import.
 //!
 //! Cards, identities and SSH keys become secure notes with their details as
-//! fields (numbers and codes hidden). Passkeys can't be moved between
-//! password managers and are counted in the warnings.
+//! fields (numbers and codes hidden). **Passkeys** come along with their
+//! logins (Bitwarden exports their private keys), and go back out in exports;
+//! only ones of a kind CleanPassword can't use (not P-256) are left out,
+//! and counted in the warnings.
 
 use std::collections::HashMap;
 
@@ -23,7 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use zeroize::Zeroizing;
 
-use crate::item::{Field, HistoryEntry, Item, ItemData, ItemKind, ItemUri, UriMatch};
+use crate::item::{Field, HistoryEntry, Item, ItemData, ItemKind, ItemUri, Passkey, UriMatch};
+use crate::passkey;
 use crate::{Error, Result};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -31,6 +34,8 @@ pub struct ImportedItem {
     pub data: ItemData,
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
+    #[serde(default)]
+    pub passkeys: Vec<Passkey>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -181,7 +186,7 @@ pub fn bitwarden_json(text: &str, password: Option<&str>) -> Result<Imported> {
 fn convert(export: BwExport) -> Imported {
     let folders: HashMap<String, String> = export.folders.into_iter().filter_map(|f| Some((f.id?, f.name.unwrap_or_default()))).collect();
     let mut out = Imported::default();
-    let mut passkeys = 0;
+    let mut unusable = 0;
     for bw in export.items {
         if bw.deleted_date.is_some() {
             continue;
@@ -200,6 +205,7 @@ fn convert(export: BwExport) -> Imported {
             }
             d.fields.push(Field { name: f.name.unwrap_or_default(), value: f.value.unwrap_or_default(), hidden: f.kind == 1 });
         }
+        let mut passkeys = Vec::new();
         match bw.kind {
             1 => {
                 let l = bw.login.unwrap_or_default();
@@ -208,7 +214,12 @@ fn convert(export: BwExport) -> Imported {
                 d.password = l.password.unwrap_or_default();
                 d.totp = l.totp.unwrap_or_default();
                 d.uris = l.uris.unwrap_or_default().into_iter().filter_map(|u| Some(ItemUri { uri: u.uri.filter(|s| !s.trim().is_empty())?, match_mode: uri_match(u.match_mode) })).collect();
-                passkeys += l.fido2_credentials.map_or(0, |c| c.len());
+                for c in l.fido2_credentials.unwrap_or_default() {
+                    match passkey::from_bitwarden(&c) {
+                        Some(p) => passkeys.push(p),
+                        None => unusable += 1,
+                    }
+                }
             }
             3..=5 => {
                 d.kind = ItemKind::Note;
@@ -234,10 +245,10 @@ fn convert(export: BwExport) -> Imported {
             .into_iter()
             .filter_map(|h| Some(HistoryEntry { password: h.password.filter(|p| !p.is_empty())?, retired: h.last_used_date.unwrap_or_else(Utc::now) }))
             .collect();
-        out.items.push(ImportedItem { data: d, history });
+        out.items.push(ImportedItem { data: d, history, passkeys });
     }
-    if passkeys > 0 {
-        out.warnings.push(format!("{passkeys} passkey(s) weren't imported: passkeys can't be moved between password managers. Keep using them in Bitwarden, or add a new passkey on those sites."));
+    if unusable > 0 {
+        out.warnings.push(format!("{unusable} passkey(s) weren't imported: they use a kind of key CleanPassword doesn't support yet (only P-256). Keep using them in Bitwarden, or add a new passkey on those sites."));
     }
     out
 }
@@ -383,7 +394,7 @@ pub fn csv(text: &str) -> Result<Imported> {
         if d.name.is_empty() && d.username.is_empty() && d.password.is_empty() && d.uris.is_empty() && d.notes.is_empty() {
             continue;
         }
-        out.items.push(ImportedItem { data: d, history: vec![] });
+        out.items.push(ImportedItem { data: d, history: vec![], passkeys: vec![] });
     }
     Ok(out)
 }
@@ -420,7 +431,8 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
             });
             if i.kind == ItemKind::Login {
                 let uris: Vec<Value> = i.uris.iter().map(|u| json!({"match": match_number(u.match_mode), "uri": u.uri})).collect();
-                v["login"] = json!({"uris": uris, "username": i.username, "password": i.password, "totp": if i.totp.is_empty() { Value::Null } else { i.totp.clone().into() }, "fido2Credentials": []});
+                let passkeys: Vec<Value> = i.passkeys.iter().map(passkey::to_bitwarden).collect();
+                v["login"] = json!({"uris": uris, "username": i.username, "password": i.password, "totp": if i.totp.is_empty() { Value::Null } else { i.totp.clone().into() }, "fido2Credentials": passkeys});
             } else {
                 v["secureNote"] = json!({"type": 0});
             }

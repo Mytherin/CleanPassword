@@ -87,10 +87,25 @@ final class Core: @unchecked Sendable {
         queue.async { self.session = nil }
     }
 
+    /// What this process last saved (or opened).
+    private var lastSaved: String?
+
     /// Saves the vault to the shared container (call after every change).
     func persist() async throws {
         let text = try await run { $0.save() }
         try SavedVault.store(text)
+        queue.sync { lastSaved = text }
+    }
+
+    /// Opens the saved vault again if another process (the AutoFill
+    /// extension, saving a new passkey) changed it since this one saved it.
+    /// Returns whether it did.
+    func reloadIfChangedOnDisk() async -> Bool {
+        guard let text = SavedVault.load(), text != queue.sync(execute: { lastSaved }) else { return false }
+        guard let key = try? await run({ $0.key() }), let s = try? await detached({ try VaultSession.unlockWithKey(saved: text, key: key) }) else { return false }
+        await open(s)
+        queue.sync { lastSaved = text }
+        return true
     }
 }
 

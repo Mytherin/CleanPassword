@@ -35,6 +35,8 @@ psl = "2"
 regex-lite = "0.1"
 # CSV imports.
 csv = "1"
+# Passkeys: P-256 keys (ES256 signatures, PKCS#8 storage as Bitwarden keeps them).
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

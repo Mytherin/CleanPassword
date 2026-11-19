@@ -234,6 +234,9 @@ pub struct ImportSummary {
     pub added: usize,
     /// Already in the vault (same name, user name, password and website).
     pub skipped: usize,
+    /// Passkeys brought in, on new items or on ones already here.
+    #[serde(default)]
+    pub passkeys: usize,
 }
 
 /// An unlocked vault.
@@ -506,11 +509,22 @@ impl Vault {
     /// already here.
     pub fn import(&mut self, items: Vec<crate::import::ImportedItem>) -> ImportSummary {
         let fingerprint = |d: &ItemData| (d.name.trim().to_lowercase(), d.username.clone(), d.password.clone(), d.uris.first().map(|u| u.uri.clone()), d.notes.clone());
-        let mut seen: std::collections::HashSet<_> = self.items().iter().map(|i| fingerprint(&i.data())).collect();
+        let mut seen: std::collections::HashMap<_, String> = self.items().iter().map(|i| (fingerprint(&i.data()), i.id.clone())).collect();
         let mut summary = ImportSummary::default();
         for imported in items {
-            if !seen.insert(fingerprint(&imported.data)) {
+            let fp = fingerprint(&imported.data);
+            if let Some(id) = seen.get(&fp).cloned() {
+                // Already here (imported before): bring in passkeys it lacks.
                 summary.skipped += 1;
+                let st = self.s.items.get_mut(&id).expect("listed above");
+                for p in imported.passkeys {
+                    if !st.item.passkeys.iter().any(|q| q.credential_id == p.credential_id) {
+                        st.item.passkeys.push(p);
+                        st.item.modified = Utc::now();
+                        st.dirty = true;
+                        summary.passkeys += 1;
+                    }
+                }
                 continue;
             }
             match self.add(imported.data) {
@@ -518,6 +532,9 @@ impl Vault {
                     let st = self.s.items.get_mut(&id).expect("just added");
                     st.item.history = imported.history;
                     st.item.history.truncate(crate::item::HISTORY_LIMIT);
+                    summary.passkeys += imported.passkeys.len();
+                    st.item.passkeys = imported.passkeys;
+                    seen.insert(fp, id);
                     summary.added += 1;
                 }
                 Err(_) => summary.skipped += 1,
@@ -660,10 +677,10 @@ pub(crate) mod tests {
     #[test]
     fn import_skips_duplicates() {
         let mut v = Vault::create(config(), creds(), PW).unwrap();
-        let wrap = |d: ItemData| crate::import::ImportedItem { data: d, history: vec![] };
+        let wrap = |d: ItemData| crate::import::ImportedItem { data: d, history: vec![], passkeys: vec![] };
         let items: Vec<_> = [login("A", "https://a.com", "x", "1"), login("A", "https://a.com", "x", "1"), login("B", "https://b.com", "x", "2")].into_iter().map(wrap).collect();
-        assert_eq!(v.import(items.clone()), ImportSummary { added: 2, skipped: 1 });
-        assert_eq!(v.import(items), ImportSummary { added: 0, skipped: 3 });
+        assert_eq!(v.import(items.clone()), ImportSummary { added: 2, skipped: 1, passkeys: 0 });
+        assert_eq!(v.import(items), ImportSummary { added: 0, skipped: 3, passkeys: 0 });
     }
 
     #[test]

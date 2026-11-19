@@ -12,6 +12,8 @@ enum Route: Hashable {
 /// The groups on the Passwords screen, as in Apple's Passwords app.
 enum Category: Hashable {
     case all
+    /// Items with passkeys.
+    case passkeys
     /// Items with a one-time code.
     case codes
     /// Weak and reused passwords.
@@ -23,6 +25,7 @@ enum Category: Hashable {
     var title: String {
         switch self {
         case .all: return "All"
+        case .passkeys: return "Passkeys"
         case .codes: return "Codes"
         case .security: return "Security"
         case .deleted: return "Deleted"
@@ -33,6 +36,7 @@ enum Category: Hashable {
     var symbol: String {
         switch self {
         case .all: return "key.fill"
+        case .passkeys: return "person.badge.key.fill"
         case .codes: return "lock.rotation"
         case .security: return "exclamationmark.shield.fill"
         case .deleted: return "trash.fill"
@@ -43,6 +47,7 @@ enum Category: Hashable {
     var color: Color {
         switch self {
         case .all: return .blue
+        case .passkeys: return .green
         case .codes: return .indigo
         case .security: return .red
         case .deleted: return .orange

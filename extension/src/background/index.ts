@@ -12,7 +12,7 @@
 //   sender.url, webNavigation), never from the page.
 
 import init, * as core from "../core/core.js";
-import type { Credentials, FillValues, FormKind, Item, ItemData, Match, MenuState, PromptState, Recipe, Role, S3Config, Settings, Submission, SyncReport } from "../shared/types";
+import type { Credentials, FillValues, FormKind, Item, ItemData, Match, MenuState, PasskeyChoice, PasskeyState, PromptState, Recipe, Role, S3Config, Settings, Submission, SyncReport } from "../shared/types";
 import { DEFAULT_SETTINGS } from "../shared/types";
 
 const EXT_ORIGIN = new URL(chrome.runtime.getURL("")).origin;
@@ -400,6 +400,189 @@ async function answerPrompt(p: PendingSave, tabId: number, answer: string): Prom
   scheduleSync();
 }
 
+// ---- Passkeys ----------------------------------------------------------------------
+//
+// Pages ask through src/webauthn (navigator.credentials.create and .get).
+// The site is the frame's origin as Chrome reports it; its relying party id
+// must be that host or a domain above it (not a public suffix). Creating a
+// passkey, or signing in with one, is confirmed in a window of
+// CleanPassword's own: a page can't cover or click into another window. A
+// page asking in its sign-in field (conditional mediation) gets its passkeys
+// in the inline menu instead. Whatever CleanPassword can't do goes to
+// Chrome's own passkey support.
+
+type PasskeyAnswer = { fallback: true } | { error: { name: string; message: string } } | { result: Record<string, unknown> };
+
+interface PasskeyRequest {
+  frame: FrameRef;
+  /** The page's id for the request (to cancel it). */
+  pageId: number;
+  kind: "create" | "get";
+  options: Record<string, any>;
+  rpId: string;
+  conditional: boolean;
+  windowId?: number;
+  resolve: (a: PasskeyAnswer) => void;
+}
+const passkeyRequests = new Map<string, PasskeyRequest>();
+
+const NOT_ALLOWED = { error: { name: "NotAllowedError", message: "The operation either timed out or was not allowed." } };
+
+function b64url(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function sha256b64(text: string): Promise<string> {
+  return b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))));
+}
+
+function finishPasskey(token: string, answer: PasskeyAnswer): void {
+  const r = passkeyRequests.get(token);
+  if (!r) return;
+  passkeyRequests.delete(token);
+  r.resolve(answer);
+  if (r.windowId !== undefined) void chrome.windows.remove(r.windowId).catch(() => {});
+}
+
+/** The waiting conditional request of a frame, if any. */
+function conditionalFor(f: FrameRef): string | undefined {
+  for (const [t, r] of passkeyRequests) if (r.conditional && r.frame.tabId === f.tabId && r.frame.frameId === f.frameId) return t;
+  return undefined;
+}
+
+function idsOf(list: unknown): string[] {
+  return Array.isArray(list) ? list.map((c: { id: string }) => c.id) : [];
+}
+
+function conditionalChoices(f: FrameRef): PasskeyChoice[] {
+  const t = conditionalFor(f);
+  const r = t ? passkeyRequests.get(t) : undefined;
+  if (!r || !session) return [];
+  return session.passkeysFor(r.rpId, idsOf(r.options.allowCredentials)) as PasskeyChoice[];
+}
+
+async function webauthn(frame: FrameRef, msg: Msg): Promise<PasskeyAnswer> {
+  const kind = msg.kind as "create" | "get";
+  const o = (msg.options ?? {}) as PasskeyRequest["options"];
+  // Only top frames (embedded sign-ins need permissions this can't check).
+  if (frame.frameId !== 0) return { fallback: true };
+  const rpId = String((kind === "create" ? o.rp?.id : o.rpId) || hostOf(frame.url)).toLowerCase();
+  if (!core.rpIdAllowed(rpId, frame.origin)) return { fallback: true };
+  if (!(await chrome.storage.local.get("vault")).vault) return { fallback: true };
+  await restore();
+  const conditional = kind === "get" && msg.mediation === "conditional";
+  if (kind === "create") {
+    if (!(o.pubKeyCredParams ?? []).some((p: { alg: number }) => p.alg === -7)) return { fallback: true };
+    if (o.authenticatorSelection?.authenticatorAttachment === "cross-platform") return { fallback: true };
+  } else if (session) {
+    const s = session;
+    const choices = await exclusive(() => s.passkeysFor(rpId, idsOf(o.allowCredentials)) as PasskeyChoice[]);
+    if (!choices.length) return { fallback: true };
+  } else if (conditional) {
+    return { fallback: true };
+  }
+  // One window per tab at a time: a page can't open a stream of them.
+  if (!conditional) {
+    for (const r of passkeyRequests.values()) if (r.frame.tabId === frame.tabId && !r.conditional) return NOT_ALLOWED;
+  }
+  return new Promise<PasskeyAnswer>((resolve) => {
+    const t = token();
+    const req: PasskeyRequest = { frame, pageId: Number(msg.id), kind, options: o, rpId, conditional, resolve };
+    passkeyRequests.set(t, req);
+    if (conditional) return; // answered from the inline menu
+    void chrome.windows.create({ url: chrome.runtime.getURL("passkey.html#" + t), type: "popup", width: 420, height: 560, focused: true }).then((w) => {
+      if (passkeyRequests.has(t)) req.windowId = w?.id;
+      else if (w?.id !== undefined) void chrome.windows.remove(w.id).catch(() => {});
+    });
+  });
+}
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  for (const [t, r] of passkeyRequests) if (r.windowId === windowId) finishPasskey(t, NOT_ALLOWED);
+});
+
+function passkeyState(token: string): PasskeyState | null {
+  const r = passkeyRequests.get(token);
+  if (!r) return null;
+  const o = r.options;
+  const s = session;
+  return {
+    kind: r.kind,
+    host: hostOf(r.frame.url),
+    rpId: r.rpId,
+    rpName: String(o.rp?.name ?? ""),
+    userName: String(o.user?.name ?? ""),
+    locked: !s,
+    choices: s && r.kind === "get" ? (s.passkeysFor(r.rpId, idsOf(o.allowCredentials)) as PasskeyChoice[]) : [],
+    logins:
+      s && r.kind === "create"
+        ? (s.matches("https://" + r.rpId) as Match[]).filter((m) => m.quality !== "related").map((m) => ({ id: m.id, name: m.name, username: m.username }))
+        : [],
+    excluded: !!s && r.kind === "create" && (s.passkeyExcluded(r.rpId, idsOf(o.excludeCredentials)) as boolean),
+  };
+}
+
+async function passkeyAssertion(r: PasskeyRequest, itemId: string, credentialId: string): Promise<Record<string, unknown>> {
+  const s = session;
+  if (!s) throw new Error("locked");
+  const cdj = core.clientDataJson("webauthn.get", String(r.options.challenge), r.frame.origin, false);
+  const a = s.assertPasskey(itemId, credentialId, r.rpId, await sha256b64(cdj)) as Record<string, string>;
+  await persist();
+  scheduleSync();
+  return { id: a.credential_id, clientDataJSON: b64url(new TextEncoder().encode(cdj)), authenticatorData: a.authenticator_data, signature: a.signature, userHandle: a.user_handle };
+}
+
+async function passkeyAnswer(token: string, msg: Msg): Promise<{ error: string | null }> {
+  const r = passkeyRequests.get(token);
+  if (!r) return { error: "This request has ended." };
+  switch (msg.action) {
+    case "fallback":
+      finishPasskey(token, { fallback: true });
+      return { error: null };
+    case "cancel":
+      finishPasskey(token, NOT_ALLOWED);
+      return { error: null };
+    case "excluded":
+      finishPasskey(token, { error: { name: "InvalidStateError", message: "A passkey for this account is already saved." } });
+      return { error: null };
+  }
+  const s = session;
+  if (!s) return { error: "Unlock CleanPassword first." };
+  // The tab must still show the site that asked.
+  if (!(await stillThere(r.frame))) {
+    finishPasskey(token, NOT_ALLOWED);
+    return { error: "The page changed." };
+  }
+  touch();
+  if (msg.action === "use") {
+    finishPasskey(token, { result: await passkeyAssertion(r, String(msg.itemId), String(msg.credentialId)) });
+    return { error: null };
+  }
+  if (msg.action === "create") {
+    const o = r.options;
+    const cdj = core.clientDataJson("webauthn.create", String(o.challenge), r.frame.origin, false);
+    const reg = s.createPasskey(
+      { rp_id: r.rpId, rp_name: o.rp?.name ?? "", user_handle: o.user?.id ?? "", user_name: o.user?.name ?? "", user_display_name: o.user?.displayName ?? "" },
+      (msg.itemId as string) || undefined,
+    ) as Record<string, string>;
+    await persist();
+    scheduleSync();
+    finishPasskey(token, {
+      result: {
+        id: reg.credential_id,
+        clientDataJSON: b64url(new TextEncoder().encode(cdj)),
+        attestationObject: reg.attestation_object,
+        authenticatorData: reg.authenticator_data,
+        publicKey: reg.public_key,
+      },
+    });
+    return { error: null };
+  }
+  return { error: "unknown action" };
+}
+
 // ---- Messages ------------------------------------------------------------------
 
 type Msg = { type: string; [k: string]: unknown };
@@ -419,7 +602,8 @@ async function fromPage(msg: Msg, sender: chrome.runtime.MessageSender): Promise
       // Nothing to offer: no menu (a locked vault still offers unlocking,
       // where there's a vault at all).
       if (!session && !(await chrome.storage.local.get("vault")).vault) return null;
-      if (session && (role === "username" || role === "current-password") && kind !== "signup" && (session.matches(frame.url) as Match[]).length === 0) return null;
+      const passkeysWaiting = conditionalFor(frame) !== undefined;
+      if (session && !passkeysWaiting && (role === "username" || role === "current-password") && kind !== "signup" && (session.matches(frame.url) as Match[]).length === 0) return null;
       if (session && role === "otp" && !tabLogin(frame.tabId, frame.url)) return null;
       const t = token();
       const embeddedIn = await embeddingPage(frame);
@@ -432,6 +616,14 @@ async function fromPage(msg: Msg, sender: chrome.runtime.MessageSender): Promise
     case "menu-closed":
       menus.delete(String(msg.token));
       return null;
+    case "webauthn":
+      return webauthn(frame, msg);
+    case "webauthn-cancel": {
+      for (const [t, r] of passkeyRequests) {
+        if (r.frame.tabId === frame.tabId && r.frame.frameId === frame.frameId && r.pageId === msg.id) finishPasskey(t, { error: { name: "AbortError", message: "The operation was aborted." } });
+      }
+      return null;
+    }
     case "submitted":
       await restore();
       await submitted(frame, msg.data as Submission);
@@ -536,6 +728,10 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     }
     case "generate":
       return core.generatePassword(msg.recipe as Recipe);
+    case "passkey-state":
+      return passkeyState(String(msg.token));
+    case "passkey-answer":
+      return passkeyAnswer(String(msg.token), msg);
     case "strength":
       return core.strength(String(msg.password));
   }
@@ -571,6 +767,8 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
       return changed(s.delete(String(msg.id)));
     case "restore":
       return changed(s.restore(String(msg.id)));
+    case "delete-passkey":
+      return changed(s.deletePasskey(String(msg.id), String(msg.credentialId)));
     case "purge":
       return changed(s.purge(String(msg.id)));
     case "sync":
@@ -626,8 +824,21 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
         suggestion: m.suggestion,
         preferredId: tabLogin(m.frame.tabId, m.frame.url),
         totpIds: matches.filter((x) => !!(s.get(x.id) as Item | undefined)?.totp).map((x) => x.id),
+        passkeys: m.role === "username" || m.role === "current-password" ? conditionalChoices(m.frame) : [],
       };
       return state;
+    }
+    case "menu-passkey": {
+      // A passkey picked in the sign-in field's menu, for the page's
+      // waiting (conditional) request.
+      const m = menus.get(String(msg.token));
+      if (!m || sender.tab?.id !== m.frame.tabId) return { error: "expired" };
+      const t = conditionalFor(m.frame);
+      const req = t ? passkeyRequests.get(t) : undefined;
+      if (!req || !t) return { error: "The page isn't asking for a passkey any more." };
+      finishPasskey(t, { result: await passkeyAssertion(req, String(msg.itemId), String(msg.credentialId)) });
+      touch();
+      return { error: null };
     }
     case "menu-fill": {
       const m = menus.get(String(msg.token));
@@ -674,7 +885,7 @@ async function lockedMenu(msg: Msg, sender: chrome.runtime.MessageSender): Promi
   const m = menus.get(String(msg.token));
   if (!m || sender.tab?.id !== m.frame.tabId) return null;
   if (msg.type === "menu-state") {
-    const state: MenuState = { locked: true, role: m.role, kind: m.kind, host: hostOf(m.frame.url), matches: [], embeddedIn: m.embeddedIn, suggestion: null, preferredId: null, totpIds: [] };
+    const state: MenuState = { locked: true, role: m.role, kind: m.kind, host: hostOf(m.frame.url), matches: [], embeddedIn: m.embeddedIn, suggestion: null, preferredId: null, totpIds: [], passkeys: [] };
     return state;
   }
   if (msg.type === "menu-unlock") await openPopup();
@@ -691,7 +902,9 @@ chrome.runtime.onMessage.addListener((msg: Msg, sender, reply) => {
     return fromExtension(msg, sender);
   };
   // Vault calls wait for a running sync (these three queue themselves).
-  const queued = ["sync", "lock", "forget"].includes(msg.type) ? handle() : exclusive(handle);
+  // A passkey request waits for the user, so it doesn't hold the queue (its
+  // vault calls queue themselves).
+  const queued = ["sync", "lock", "forget", "webauthn", "webauthn-cancel"].includes(msg.type) ? handle() : exclusive(handle);
   queued.then(
     (value) => reply({ ok: true, value }),
     (e: unknown) => reply({ ok: false, error: String((e as Error)?.message ?? e), name: (e as Error)?.name }),
@@ -722,6 +935,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   pendingSaves.delete(tabId);
   generatedIn.delete(tabId);
   stepUsernames.delete(tabId);
+  for (const [t, r] of passkeyRequests) if (r.frame.tabId === tabId) finishPasskey(t, { error: { name: "NotAllowedError", message: "The tab was closed." } });
 });
 
 /** Keyboard shortcuts and context-menu commands given, by tab. */

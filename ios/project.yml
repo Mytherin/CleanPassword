@@ -89,6 +89,7 @@ targets:
             ASCredentialProviderExtensionShowsConfigurationUI: true
             ASCredentialProviderExtensionCapabilities:
               ProvidesPasswords: true
+              ProvidesPasskeys: true
     entitlements:
       path: CleanPasswordAutoFill/CleanPasswordAutoFill.entitlements
       properties:

@@ -1,10 +1,12 @@
 import AuthenticationServices
 import Foundation
 
-/// What iOS shows above the keyboard: the user names and websites of the
-/// logins (never passwords), registered with the system so it can suggest
-/// them without opening the extension; picking one asks the extension for
-/// the password. Off in Settings, the list is cleared.
+/// What iOS shows above the keyboard and in Safari's sign-in sheets: the
+/// user names and websites of the logins (never passwords), and the
+/// passkeys (their site, user name and id, never their keys), registered
+/// with the system so it can offer them without opening the extension;
+/// picking one asks the extension for it. Off in Settings, the list is
+/// cleared.
 enum SuggestionStore {
     static let settingKey = "keyboardSuggestions"
 
@@ -18,15 +20,9 @@ enum SuggestionStore {
     }
 
     static func update(with items: [VaultItem]) {
-        let store = ASCredentialIdentityStore.shared
-        store.getState { state in
-            guard state.isEnabled else { return }
-            guard enabled else {
-                store.removeAllCredentialIdentities(nil)
-                return
-            }
-            var identities: [ASPasswordCredentialIdentity] = []
-            for item in items where item.fields.kind == .login && !item.fields.password.isEmpty {
+        var identities: [any ASCredentialIdentity] = []
+        for item in items where item.fields.kind == .login {
+            if !item.fields.password.isEmpty {
                 for site in item.fields.websites where site.matching != .never {
                     let full = site.uri.contains("://") ? site.uri : "https://\(site.uri)"
                     guard let host = URL(string: full)?.host else { continue }
@@ -34,11 +30,23 @@ enum SuggestionStore {
                     identities.append(ASPasswordCredentialIdentity(serviceIdentifier: service, user: item.fields.username, recordIdentifier: item.id))
                 }
             }
-            store.replaceCredentialIdentities(with: identities, completion: nil)
+            for p in item.passkeys {
+                identities.append(ASPasskeyCredentialIdentity(relyingPartyIdentifier: p.rpId, userName: p.userName, credentialID: p.credentialId, userHandle: p.userHandle, recordIdentifier: item.id))
+            }
+        }
+        Task {
+            let store = ASCredentialIdentityStore.shared
+            let state = await store.state()
+            guard state.isEnabled else { return }
+            if enabled {
+                try? await store.replaceCredentialIdentities(identities)
+            } else {
+                try? await store.removeAllCredentialIdentities()
+            }
         }
     }
 
     static func clear() {
-        ASCredentialIdentityStore.shared.removeAllCredentialIdentities(nil)
+        Task { try? await ASCredentialIdentityStore.shared.removeAllCredentialIdentities() }
     }
 }

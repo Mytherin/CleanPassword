@@ -20,6 +20,7 @@ pub mod generator;
 pub mod import;
 pub mod item;
 pub mod matching;
+pub mod passkey;
 pub mod rules;
 pub mod s3;
 pub mod sync;

@@ -18,6 +18,7 @@ use cleanpassword_core::generator::{self, Recipe};
 use cleanpassword_core::import;
 use cleanpassword_core::item::{Field, ItemData, ItemKind, ItemUri, UriMatch};
 use cleanpassword_core::matching::Quality;
+use cleanpassword_core::passkey::{self, NewPasskey};
 use cleanpassword_core::s3::{HttpRequest, HttpResponse, Transport};
 use cleanpassword_core::sync::{self, SyncReport};
 use cleanpassword_core::vault::{self, VaultHeader};
@@ -154,6 +155,48 @@ pub struct VaultItem {
     pub created: i64,
     pub modified: i64,
     pub deleted: Option<i64>,
+    pub passkeys: Vec<PasskeyInfo>,
+}
+
+/// A passkey on an item (without its private key).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PasskeyInfo {
+    /// base64url, as the core keeps it (to delete it by).
+    pub id: String,
+    /// The raw credential id, as iOS wants it.
+    pub credential_id: Vec<u8>,
+    pub rp_id: String,
+    pub rp_name: String,
+    pub user_name: String,
+    pub user_handle: Vec<u8>,
+    pub created: i64,
+}
+
+/// A passkey offered for signing in.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PasskeyOption {
+    pub item_id: String,
+    pub item_name: String,
+    pub credential_id: Vec<u8>,
+    pub user_name: String,
+    pub user_display_name: String,
+}
+
+/// A new passkey, for iOS's registration answer.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PasskeyRegistration {
+    pub item_id: String,
+    pub credential_id: Vec<u8>,
+    pub attestation_object: Vec<u8>,
+}
+
+/// A passkey sign-in, for iOS's assertion answer.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PasskeySignature {
+    pub credential_id: Vec<u8>,
+    pub authenticator_data: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub user_handle: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -190,6 +233,8 @@ pub struct OneTimeCode {
 pub struct ImportOutcome {
     pub added: u64,
     pub skipped: u64,
+    /// Passkeys brought in.
+    pub passkeys: u64,
     pub warnings: Vec<String>,
 }
 
@@ -296,6 +341,19 @@ fn item_record(i: &Item) -> VaultItem {
         created: secs(i.created),
         modified: secs(i.modified),
         deleted: i.deleted.map(secs),
+        passkeys: i
+            .passkeys
+            .iter()
+            .map(|p| PasskeyInfo {
+                id: p.credential_id.clone(),
+                credential_id: passkey::unb64(&p.credential_id).unwrap_or_default(),
+                rp_id: p.rp_id.clone(),
+                rp_name: p.rp_name.clone(),
+                user_name: p.user_name.clone(),
+                user_handle: passkey::unb64(&p.user_handle).unwrap_or_default(),
+                created: secs(p.created),
+            })
+            .collect(),
     }
 }
 
@@ -474,7 +532,7 @@ impl VaultSession {
     pub fn import_file(&self, text: String, password: Option<String>) -> R<ImportOutcome> {
         let imported = import::import_file(&text, password.as_deref())?;
         let s = self.v().import(imported.items);
-        Ok(ImportOutcome { added: s.added as u64, skipped: s.skipped as u64, warnings: imported.warnings })
+        Ok(ImportOutcome { added: s.added as u64, skipped: s.skipped as u64, passkeys: s.passkeys as u64, warnings: imported.warnings })
     }
 
     /// Everything as an unencrypted Bitwarden JSON export.
@@ -504,6 +562,48 @@ impl VaultSession {
 
     pub fn last_sync(&self) -> Option<i64> {
         self.v().last_sync().map(secs)
+    }
+
+    // ---- Passkeys (for the AutoFill extension) ------------------------------
+
+    /// The passkeys for a relying party, limited to `allowed` credential ids
+    /// if not empty.
+    pub fn passkeys_for(&self, rp_id: String, allowed: Vec<Vec<u8>>) -> Vec<PasskeyOption> {
+        self.v()
+            .passkeys_for(&rp_id, &allowed)
+            .into_iter()
+            .map(|c| PasskeyOption {
+                item_id: c.item_id,
+                item_name: c.item_name,
+                credential_id: passkey::unb64(&c.credential_id).unwrap_or_default(),
+                user_name: c.user_name,
+                user_display_name: c.user_display_name,
+            })
+            .collect()
+    }
+
+    /// Whether one of the site's credentials for the account is here already.
+    pub fn passkey_excluded(&self, rp_id: String, excluded: Vec<Vec<u8>>) -> bool {
+        self.v().passkey_excluded(&rp_id, &excluded)
+    }
+
+    /// Creates a passkey and saves it on a login (`item_id`, or the
+    /// matching one, or a new one).
+    pub fn create_passkey(&self, rp_id: String, rp_name: String, user_handle: Vec<u8>, user_name: String, user_display_name: String, item_id: Option<String>) -> R<PasskeyRegistration> {
+        let req = NewPasskey { rp_id, rp_name, user_handle, user_name, user_display_name };
+        let r = self.v().create_passkey(&req, item_id.as_deref())?;
+        Ok(PasskeyRegistration { item_id: r.item_id, credential_id: r.credential_id, attestation_object: r.attestation_object })
+    }
+
+    /// Signs in with a passkey; `client_data_hash` is what iOS hands over.
+    pub fn assert_passkey(&self, item_id: String, credential_id: Vec<u8>, rp_id: String, client_data_hash: Vec<u8>) -> R<PasskeySignature> {
+        let a = self.v().assert_passkey(&item_id, &credential_id, &rp_id, &client_data_hash)?;
+        Ok(PasskeySignature { credential_id: a.credential_id, authenticator_data: a.authenticator_data, signature: a.signature, user_handle: a.user_handle })
+    }
+
+    /// Removes a passkey (`id` as in [`PasskeyInfo::id`]).
+    pub fn delete_passkey(&self, item_id: String, id: String) -> R<()> {
+        Ok(self.v().delete_passkey(&item_id, &id)?)
     }
 
     /// Syncs with S3. Blocks on the network: call it off the main thread.
@@ -616,6 +716,23 @@ mod tests {
         let info = locked_vault(saved).unwrap();
         assert_eq!(info.settings, settings());
         assert!(locked_vault("garbage".into()).is_none());
+    }
+
+    #[test]
+    fn passkeys_through_the_bindings() {
+        let s = VaultSession::create(settings(), keys(), "a long master password".into()).unwrap();
+        let r = s.create_passkey("example.com".into(), "Example".into(), b"user-1".to_vec(), "me@example.com".into(), "Me".into(), None).unwrap();
+        assert_eq!(r.credential_id.len(), 16);
+        let item = s.get(r.item_id.clone()).unwrap();
+        assert_eq!(item.passkeys[0].credential_id, r.credential_id);
+        assert_eq!(item.passkeys[0].user_handle, b"user-1");
+        let options = s.passkeys_for("example.com".into(), vec![]);
+        assert_eq!(options.len(), 1);
+        assert!(s.passkey_excluded("example.com".into(), vec![r.credential_id.clone()]));
+        let sig = s.assert_passkey(r.item_id.clone(), r.credential_id.clone(), "example.com".into(), vec![9; 32]).unwrap();
+        assert_eq!(sig.user_handle, b"user-1");
+        s.delete_passkey(r.item_id.clone(), item.passkeys[0].id.clone()).unwrap();
+        assert!(s.passkeys_for("example.com".into(), vec![]).is_empty());
     }
 
     #[test]

@@ -12,6 +12,7 @@ struct ItemListView: View {
             switch category {
             case .all: lettered(store.items)
             case .folder(let f): lettered(store.items.filter { $0.fields.folder == f })
+            case .passkeys: lettered(store.items.filter { !$0.passkeys.isEmpty })
             case .codes: CodesList()
             case .security: SecurityList()
             case .deleted: DeletedList()

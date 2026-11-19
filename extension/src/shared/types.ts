@@ -34,6 +34,7 @@ export interface Item extends ItemData {
   modified: string;
   password_modified?: string;
   deleted?: string;
+  passkeys?: { credential_id: string; rp_id: string; rp_name: string; user_name: string; created: string }[];
 }
 
 export type Quality = "related" | "domain" | "host";
@@ -136,6 +137,32 @@ export interface MenuState {
   preferredId: string | null;
   /** Items with TOTP codes among the matches. */
   totpIds: string[];
+  /** Passkeys to sign in with, when the page asked for one in its sign-in
+   *  field (WebAuthn conditional mediation). */
+  passkeys: PasskeyChoice[];
+}
+
+export interface PasskeyChoice {
+  item_id: string;
+  item_name: string;
+  credential_id: string;
+  user_name: string;
+  user_display_name: string;
+}
+
+/** What the passkey window shows. */
+export interface PasskeyState {
+  kind: "create" | "get";
+  host: string;
+  rpId: string;
+  rpName: string;
+  userName: string;
+  locked: boolean;
+  choices: PasskeyChoice[];
+  /** Logins a new passkey can be saved on (create). */
+  logins: { id: string; name: string; username: string }[];
+  /** The site already has a passkey of this account in the vault. */
+  excluded: boolean;
 }
 
 export interface PromptState {

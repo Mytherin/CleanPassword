@@ -43,7 +43,9 @@ const builds = [
   { entryPoints: { background: "src/background/index.ts" }, format: "esm" },
   // Content scripts can't be modules.
   { entryPoints: { content: "src/content/index.ts" }, format: "iife" },
-  { entryPoints: { popup: "src/popup/popup.ts", menu: "src/menu/menu.ts", prompt: "src/prompt/prompt.ts" }, format: "iife" },
+  { entryPoints: { popup: "src/popup/popup.ts", menu: "src/menu/menu.ts", prompt: "src/prompt/prompt.ts", passkey: "src/passkey/passkey.ts" }, format: "iife" },
+  // Passkeys: the page script (in the page's own world) and its bridge.
+  { entryPoints: { "webauthn-page": "src/webauthn/page.ts", "webauthn-bridge": "src/webauthn/bridge.ts" }, format: "iife" },
   // The classifier alone, for tests that run it in pages.
   { entryPoints: { "test-classify": "src/content/test-entry.ts" }, format: "iife", outdir: join(here, "test", "build") },
 ];

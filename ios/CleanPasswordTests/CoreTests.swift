@@ -54,6 +54,29 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(isValidTotp(secret: "not a secret!"))
     }
 
+    /// What the AutoFill extension does for a site: save a passkey, then
+    /// sign in with it.
+    func testPasskeys() throws {
+        let s = try VaultSession.create(settings: settings, keys: keys, password: password)
+        let reg = try s.createPasskey(rpId: "example.com", rpName: "Example", userHandle: Data("user-1".utf8), userName: "me@example.com", userDisplayName: "Me", itemId: nil)
+        XCTAssertEqual(reg.credentialId.count, 16)
+        XCTAssertEqual(reg.attestationObject.prefix(1), Data([0xa3]))
+        let item = try XCTUnwrap(s.get(id: reg.itemId))
+        XCTAssertEqual(item.passkeys.first?.rpId, "example.com")
+        XCTAssertEqual(item.passkeys.first?.userHandle, Data("user-1".utf8))
+
+        let options = s.passkeysFor(rpId: "example.com", allowed: [])
+        XCTAssertEqual(options.map(\.credentialId), [reg.credentialId])
+        XCTAssertTrue(s.passkeysFor(rpId: "other.com", allowed: []).isEmpty)
+        let sig = try s.assertPasskey(itemId: reg.itemId, credentialId: reg.credentialId, rpId: "example.com", clientDataHash: Data(repeating: 7, count: 32))
+        XCTAssertEqual(sig.userHandle, Data("user-1".utf8))
+        XCTAssertEqual(sig.authenticatorData.count, 37)
+        XCTAssertThrowsError(try s.assertPasskey(itemId: reg.itemId, credentialId: reg.credentialId, rpId: "evil.com", clientDataHash: Data(repeating: 7, count: 32)))
+
+        try s.deletePasskey(itemId: reg.itemId, id: item.passkeys[0].id)
+        XCTAssertTrue(s.passkeysFor(rpId: "example.com", allowed: []).isEmpty)
+    }
+
     func testImportBitwardenJson() throws {
         let s = try VaultSession.create(settings: settings, keys: keys, password: password)
         let json = #"{"encrypted":false,"folders":[],"items":[{"type":1,"name":"GitHub","login":{"username":"octo","password":"x","uris":[{"uri":"https://github.com"}]}}]}"#
