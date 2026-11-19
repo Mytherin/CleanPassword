@@ -858,6 +858,10 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
       return s.search(String(msg.query));
     case "audit":
       return s.audit();
+    case "duplicates":
+      return s.duplicates();
+    case "merge-duplicates":
+      return changed(s.mergeDuplicates());
     case "totp":
       return s.totp(String(msg.id));
     case "add":

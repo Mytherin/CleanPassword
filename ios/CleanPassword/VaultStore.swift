@@ -16,6 +16,9 @@ final class VaultStore: ObservableObject {
     @Published var trash: [VaultItem] = []
     /// Weak and reused passwords (the Security tile).
     @Published var findings: [AuditFinding] = []
+    /// Logins that are copies of another for the same site (saved once per
+    /// host by a browser), to merge.
+    @Published var duplicates: UInt64 = 0
     @Published var syncing = false
     @Published var syncMessage: String?
     @Published var lastSync: Date?
@@ -111,10 +114,11 @@ final class VaultStore: ObservableObject {
     // MARK: Items
 
     func reload() async {
-        let all = try? await Core.shared.run { s in (s.items(), s.trash(), s.audit()) }
+        let all = try? await Core.shared.run { s in (s.items(), s.trash(), s.audit(), s.duplicates()) }
         items = all?.0 ?? []
         trash = all?.1 ?? []
         findings = all?.2 ?? []
+        duplicates = all?.3 ?? 0
         SuggestionStore.update(with: items)
     }
 
