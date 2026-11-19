@@ -14,6 +14,23 @@ let state: MenuState | null = null;
 let rows: HTMLButtonElement[] = [];
 let confirming: string | null = null;
 
+// With more logins than fit, the list scrolls and a field above it narrows it
+// down by name or user name. The field lives across renders, keeping what was
+// typed and the focus.
+const FILTER_FROM = 7;
+const filter = h("input", {
+  class: "filter",
+  type: "search",
+  placeholder: "Filter logins",
+  "aria-label": "Filter logins",
+  autocomplete: "off",
+  spellcheck: "false",
+});
+filter.addEventListener("input", () => {
+  confirming = null;
+  render();
+});
+
 // ---- Click safety -------------------------------------------------------------------
 
 let visibleSince = 0;
@@ -109,7 +126,15 @@ function render(): void {
     if (s.role !== "new-password" && s.role !== "confirm-password") {
       // The login chosen at the step before comes first.
       matches = [...matches].sort((a, b) => Number(b.id === s.preferredId) - Number(a.id === s.preferredId));
-      for (const m of matches.slice(0, 6)) root.append(matchRow(m));
+      if (matches.length >= FILTER_FROM) {
+        root.append(filter);
+        const q = filter.value.trim().toLowerCase();
+        if (q) matches = matches.filter((m) => m.name.toLowerCase().includes(q) || (m.username ?? "").toLowerCase().includes(q));
+      }
+      const list = h("div", { class: "list" });
+      for (const m of matches) list.append(matchRow(m));
+      if (!matches.length && filter.value.trim()) list.append(h("div", { class: "small muted", style: "padding: 8px 12px" }, "No matching logins"));
+      root.append(list);
     }
   }
   root.append(
@@ -118,25 +143,48 @@ function render(): void {
       s.locked ? null : h("button", { class: "link small", onclick: (e: Event) => void act(e, async () => (await ask("menu-off", { token }), null)) }, "Not on this site"),
     ),
   );
-  rows[0]?.classList.add("selected");
+  if (document.activeElement !== filter) rows[0]?.classList.add("selected");
   resize();
 }
 
 // ---- Keyboard --------------------------------------------------------------------------
 
+const firstListed = (): HTMLButtonElement | undefined => rows.find((r) => r.closest(".list"));
+
 document.addEventListener("keydown", (e) => {
+  const filtering = filter.isConnected;
+  if (document.activeElement === filter) {
+    if (e.key === "ArrowDown") firstListed()?.focus();
+    else if (e.key === "Enter") firstListed()?.click();
+    else if (e.key === "Escape") {
+      if (filter.value) {
+        filter.value = "";
+        render();
+      } else close();
+    } else return;
+    e.preventDefault();
+    return;
+  }
   const i = rows.indexOf(document.activeElement as HTMLButtonElement);
   if (e.key === "ArrowDown") rows[Math.min(i + 1, rows.length - 1)]?.focus();
   else if (e.key === "ArrowUp") {
-    if (i <= 0) close();
+    // From the first login, up goes to the filter (when there is one).
+    if (filtering && i >= 0 && rows[i] === firstListed()) filter.focus();
+    else if (i <= 0) close();
     else rows[i - 1].focus();
   } else if (e.key === "Escape") close();
-  else return;
+  else if (filtering && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Typing on a row types into the filter.
+    filter.focus();
+    return;
+  } else return;
   e.preventDefault();
 });
 
 window.addEventListener("message", (e) => {
   if (e.data?.type === "focus-first") rows[0]?.focus();
+  // As tall as there's room for in the page's window, the list scrolling.
+  if (e.data?.type === "max-height" && typeof e.data.height === "number") root.style.maxHeight = `${e.data.height}px`;
 });
 
 ask<MenuState | null>("menu-state", { token })

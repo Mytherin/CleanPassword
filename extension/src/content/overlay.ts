@@ -133,10 +133,23 @@ export class Overlay {
   /** The style attribute as we last set it (other changes are the page's). */
   private ownStyle: string | null = null;
 
+  /** The most height there is for it in the window. The menu must fit
+   *  entirely: it takes clicks only while Chrome reports all of it visible, so
+   *  one running off the bottom of the window would ignore every click. */
+  private room = 420;
+  /** How tall the menu would like to be. */
+  private wanted = 52;
+
   private size(height: number): void {
     if (!(height >= 24)) return;
-    this.height = Math.min(height, 420);
-    this.applyStyle();
+    this.wanted = Math.min(height, 420);
+    this.height = Math.min(this.wanted, this.room);
+    this.position();
+  }
+
+  /** Tells the frame how tall it may be (it scrolls its list to fit). */
+  private sendRoom(): void {
+    this.frame?.contentWindow?.postMessage({ type: "max-height", height: this.room }, EXT_ORIGIN);
   }
 
   private applyStyle(): void {
@@ -152,15 +165,31 @@ export class Overlay {
 
   private position(): void {
     if (!this.host) return;
+    let room: number;
     if (this.placement === "corner" || !this.anchor) {
       this.width = 340;
       this.top = 12;
       this.left = Math.max(4, window.innerWidth - this.width - 12);
+      room = window.innerHeight - 24;
     } else {
       const r = this.anchor.getBoundingClientRect();
-      this.width = Math.min(Math.max(r.width, 280), 360);
+      // Whole pixels: a frame of fractional width shows its page a pixel
+      // narrower than that page lays out, and Chrome then reports the menu
+      // as not entirely visible, ignoring every click (as on AWS's sign-in).
+      this.width = Math.round(Math.min(Math.max(r.width, 280), 360));
       this.left = Math.max(4, Math.min(r.left, window.innerWidth - this.width - 4));
-      this.top = r.bottom + 4;
+      // Below the field, or above it when there's more room there.
+      const below = Math.floor(window.innerHeight - r.bottom - 12);
+      const above = Math.floor(r.top - 12);
+      const up = this.wanted > below && above > below;
+      room = up ? above : below;
+      this.height = Math.min(this.wanted, Math.max(room, 24));
+      this.top = up ? r.top - 4 - this.height : r.bottom + 4;
+    }
+    room = Math.max(24, Math.min(420, room));
+    if (room !== this.room) {
+      this.room = room;
+      this.sendRoom();
     }
     this.applyStyle();
   }
@@ -212,7 +241,10 @@ export class Overlay {
   private onMessage(e: MessageEvent): void {
     if (!this.frame || e.source !== this.frame.contentWindow || e.origin !== EXT_ORIGIN) return;
     const m = e.data as { type?: string; height?: number };
-    if (m.type === "height" && typeof m.height === "number") this.size(m.height);
+    if (m.type === "height" && typeof m.height === "number") {
+      this.sendRoom();
+      this.size(m.height);
+    }
     if (m.type === "close") {
       const anchor = this.anchor;
       this.close();

@@ -6,8 +6,13 @@
 <link rel="stylesheet" href="ui.css">
 <style>
   html, body { background: var(--bg); overflow: hidden; }
-  #root { padding: 4px; }
+  #root { padding: 4px; display: flex; flex-direction: column; }
+  #root > * { flex: none; }
+  #root > .list { flex: 0 1 auto; min-height: 0; }
   .foot { display: flex; justify-content: space-between; align-items: center; padding: 4px 12px 6px; border-top: 1px solid var(--line); margin-top: 4px; }
+  .list { max-height: 272px; overflow-y: auto; overscroll-behavior: contain; }
+  .filter { display: block; width: calc(100% - 8px); margin: 4px 4px 6px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg2); outline: none; }
+  .filter:focus { border-color: var(--accent); }
   .confirm .sub { color: var(--warn-fg); }
 </style>
 </head>
