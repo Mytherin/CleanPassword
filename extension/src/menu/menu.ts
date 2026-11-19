@@ -75,8 +75,14 @@ new ResizeObserver(resize).observe(root);
 async function act(e: Event, f: () => Promise<{ error: string | null } | null | undefined>): Promise<void> {
   if (!safeToAct(e)) return;
   const r = await f().catch((err: Error) => ({ error: err.message }));
-  if (r?.error) {
-    root.append(h("div", { class: "error", style: "padding: 4px 12px" }, r.error));
+  // A menu the extension has forgotten can't do anything: it goes (the
+  // field gets a new one when it's next clicked).
+  if (r?.error === "expired") close();
+  else if (r?.error) {
+    const shown = root.querySelector(".error.act");
+    const box = h("div", { class: "error act", style: "padding: 4px 12px" }, r.error);
+    if (shown) shown.replaceWith(box);
+    else root.append(box);
     resize();
   } else close();
 }

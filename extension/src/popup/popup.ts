@@ -44,6 +44,55 @@ async function run(err: HTMLElement, f: () => Promise<void>, button?: HTMLButton
   }
 }
 
+/** A bar and a line saying what's going on, for the slow steps: deriving the
+ *  key from the master password (a bar that moves, as there's no telling how
+ *  far along it is) and downloading the vault (one that fills). */
+function progressBox(): { el: HTMLElement; show: (text: string, done?: number, total?: number) => void; hide: () => void } {
+  const bar = h("div", {});
+  const label = h("div", { class: "small muted" });
+  const el = h("div", { class: "progress", role: "status", "aria-live": "polite" }, h("div", { class: "meter" }, bar), label);
+  el.hidden = true;
+  return {
+    el,
+    show(text, done, total) {
+      el.hidden = false;
+      label.textContent = text;
+      const known = total !== undefined && total > 0;
+      bar.classList.toggle("busy", !known);
+      bar.style.width = known ? `${Math.round(((done ?? 0) / total) * 100)}%` : "";
+    },
+    hide() {
+      el.hidden = true;
+    },
+  };
+}
+
+/** Shows a step's progress while it runs; hides it if it fails. */
+async function withProgress<T>(p: ReturnType<typeof progressBox>, text: string, f: () => Promise<T>): Promise<T> {
+  p.show(text);
+  try {
+    return await f();
+  } catch (e) {
+    p.hide();
+    throw e;
+  }
+}
+
+/** The first download of a vault joined here, with how far it's got. */
+async function download(p: ReturnType<typeof progressBox>): Promise<void> {
+  const listener = (m: { type?: string; done?: number; total?: number }) => {
+    if (m?.type === "sync-progress" && typeof m.done === "number" && typeof m.total === "number") {
+      p.show(`Downloading your passwords… ${m.done} of ${m.total}`, m.done, m.total);
+    }
+  };
+  chrome.runtime.onMessage.addListener(listener);
+  try {
+    await withProgress(p, "Downloading your passwords…", () => ask("sync"));
+  } finally {
+    chrome.runtime.onMessage.removeListener(listener);
+  }
+}
+
 function input(attrs: Record<string, string | boolean>): HTMLInputElement {
   return h("input", { autocomplete: "off", spellcheck: "false", ...attrs });
 }
@@ -124,6 +173,7 @@ function choosePassword(config: S3Config, credentials: Credentials, exists: bool
   const meter = strengthMeter();
   const err = errorBox();
   const go = h("button", { class: "btn primary", type: "submit" }, exists ? "Unlock" : "Create vault");
+  const progress = progressBox();
   pw.addEventListener("input", () => void meter.update(pw.value));
   const form = h("form", { class: "form" },
     exists
@@ -134,12 +184,15 @@ function choosePassword(config: S3Config, credentials: Credentials, exists: bool
     exists ? null : h("label", {}, "Confirm", again),
     err,
     h("div", { style: "display:flex; justify-content:flex-end" }, go),
+    progress.el,
   );
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     void run(err, async () => {
       if (!exists && pw.value !== again.value) throw new Error("The passwords don't match.");
-      await ask(exists ? "join" : "create", { config, credentials, password: pw.value });
+      await withProgress(progress, exists ? "Unlocking with your master password…" : "Creating your vault…", () =>
+        ask(exists ? "join" : "create", { config, credentials, password: pw.value }));
+      if (exists) await download(progress);
       await home();
     }, go);
   });
@@ -153,16 +206,18 @@ function unlock(s: State): void {
   const pw = input({ type: "password", autocomplete: "current-password", placeholder: "Master password" });
   const err = errorBox();
   const go = h("button", { class: "btn primary", type: "submit" }, "Unlock");
+  const progress = progressBox();
   const form = h("form", { class: "form", style: "margin-top: 40px" },
     h("div", { style: "text-align:center; font-size:36px" }, "🔒"),
     h("p", { class: "muted", style: "text-align:center" }, s.info ? `${s.info.config.bucket}/${s.info.config.prefix}` : ""),
     pw, err,
     h("div", { style: "display:flex; justify-content:center" }, go),
+    progress.el,
   );
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     void run(err, async () => {
-      await ask("unlock", { password: pw.value });
+      await withProgress(progress, "Unlocking…", () => ask("unlock", { password: pw.value }));
       await home();
     }, go);
   });

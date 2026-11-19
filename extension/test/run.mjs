@@ -182,6 +182,43 @@ try {
     check("the page's framework sees the change", values.state.u === "alice@example.com" && values.state.p === "s3cret-Passw0rd", JSON.stringify(values.state));
   }
 
+  // The same login saved twice more, under longer names: offered once.
+  const dupIds = [];
+  for (const name of ["Test site (copy)", "Test site, imported from Chrome"]) {
+    dupIds.push(await ask("add", { data: { kind: "login", name, username: "alice@example.com", password: "s3cret-Passw0rd", uris: [{ uri: WEB }], totp: "", notes: "", folder: "", favorite: false, fields: [] } }));
+  }
+  await tab.goto(`${WEB}/login`);
+  await sleep(500);
+  await tab.click("#u");
+  const dupFrame = await waitForFrame(tab, "menu.html");
+  if (dupFrame) {
+    await dupFrame.waitForSelector(".row");
+    const titles = await dupFrame.$$eval(".list .row .title", (r) => r.map((e) => e.textContent));
+    check("offers the same login saved three times once, under its shortest name", titles.length === 1 && titles[0] === "Test site", JSON.stringify(titles));
+  } else check("offers the same login saved three times once, under its shortest name", false);
+  for (const id of dupIds) await ask("purge", { id });
+
+  // Chrome stops the extension's worker while a menu is open: the menu
+  // still fills (it doesn't say "expired").
+  await tab.goto(`${WEB}/login`);
+  await sleep(500);
+  await tab.click("#u");
+  const kept = await waitForFrame(tab, "menu.html");
+  if (kept) {
+    await kept.waitForSelector(".row");
+    const swTarget = browser.targets().find((t) => t.type() === "service_worker" && t.url().endsWith("/background.js"));
+    const cdp = await browser.target().createCDPSession();
+    await cdp.send("Target.closeTarget", { targetId: swTarget._targetId });
+    await sleep(1000);
+    const stopped = !browser.targets().some((t) => t.type() === "service_worker" && t.url().endsWith("/background.js"));
+    await kept.click(".row");
+    await sleep(1500);
+    const v = await tab.evaluate(() => [document.getElementById("u").value, document.getElementById("p").value]);
+    check("a menu still fills after Chrome restarts the extension's worker", stopped && v[0] === "alice@example.com" && v[1] === "s3cret-Passw0rd", JSON.stringify({ stopped, v }));
+    await sleep(300);
+    check("and the menu doesn't open again on the field just filled", !(await waitForFrame(tab, "menu.html", 500)));
+  }
+
   // A click too soon after the menu appears does nothing.
   await tab.goto(`${WEB}/login`);
   await sleep(500);
@@ -318,6 +355,32 @@ try {
   await sleep(500);
   await tab.click("#u");
   check("no menu on a see-through page (clickjacking)", !(await waitForFrame(tab, "menu.html", 1500)));
+  // Adding the vault in S3 to a browser: progress while it downloads.
+  const countBefore = (await ask("items")).length;
+  await ask("forget");
+  await popup.bringToFront();
+  await popup.goto(`chrome-extension://${id}/popup.html`);
+  await popup.waitForSelector('input[placeholder="my-bucket"]');
+  await popup.type('input[placeholder="my-bucket"]', "vault-bucket");
+  await popup.click("details summary");
+  await popup.type('input[placeholder^="https://"]', `http://127.0.0.1:${s3.port}`);
+  await popup.type('input[placeholder="AKIA…"]', "AKIATEST");
+  await popup.type('input[placeholder="Secret access key"]', "secret");
+  await popup.click("button[type=submit]");
+  await popup.waitForSelector('input[placeholder="Master password"]', { timeout: 10000 });
+  await popup.evaluate(() => {
+    window.seen = [];
+    new MutationObserver(() => {
+      const t = document.querySelector(".progress:not([hidden]) .small")?.textContent;
+      if (t && window.seen.at(-1) !== t) window.seen.push(t);
+    }).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+  });
+  await popup.type('input[placeholder="Master password"]', "correct horse battery staple");
+  await popup.click("button[type=submit]");
+  await popup.waitForSelector("input.search", { timeout: 20000 });
+  const seen = await popup.evaluate(() => window.seen);
+  check("shows progress while unlocking and downloading a vault", seen[0]?.startsWith("Unlocking") && seen.includes(`Downloading your passwords… ${countBefore} of ${countBefore}`), JSON.stringify(seen));
+  check("and has every item once it's done", (await ask("items")).length === countBefore);
 } finally {
   await browser.close();
   web.close();

@@ -340,12 +340,19 @@ impl Session {
 
     /// Syncs with S3; resolves to the report. Other calls fail while it
     /// runs.
-    pub fn sync(&self, fetch: js_sys::Function) -> js_sys::Promise {
+    /// `progress(done, total)`, if given, hears how many of the items to
+    /// download have come so far.
+    pub fn sync(&self, fetch: js_sys::Function, progress: Option<js_sys::Function>) -> js_sys::Promise {
         let cell = self.vault.clone();
         wasm_bindgen_futures::future_to_promise(async move {
             let taken = cell.borrow_mut().take();
             let mut vault = taken.ok_or_else(|| bad(JsError::new("a sync is already running")))?;
-            let result: Result<SyncReport, Error> = vault.sync(&JsTransport(fetch)).await;
+            let mut report = |done: usize, total: usize| {
+                if let Some(f) = &progress {
+                    let _ = f.call2(&JsValue::NULL, &JsValue::from(done as u32), &JsValue::from(total as u32));
+                }
+            };
+            let result: Result<SyncReport, Error> = vault.sync_with_progress(&JsTransport(fetch), &mut report).await;
             *cell.borrow_mut() = Some(vault);
             match result {
                 Ok(report) => to_js(&report).map_err(bad),

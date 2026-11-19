@@ -13,6 +13,8 @@ const menu = new Overlay("menu.html", "below");
 const prompt = new Overlay("prompt.html", "corner");
 let menuToken: string | null = null;
 let menuField: HTMLInputElement | null = null;
+/** No menu while a fill moves the focus through the fields, and just after. */
+let fillingUntil = 0;
 
 function send<T = unknown>(msg: Record<string, unknown>): Promise<T | null> {
   return chrome.runtime
@@ -59,6 +61,7 @@ async function openMenu(field: HTMLInputElement): Promise<void> {
   const g = groupOf(field);
   const role = g?.roles.get(field);
   if (!g || !role || menu.disabled) return;
+  if (Date.now() < fillingUntil) return;
   if ((menuField === field && menu.isOpen) || opening === field) return;
   const r = field.getBoundingClientRect();
   if (r.width < 60) return;
@@ -209,7 +212,10 @@ chrome.runtime.onMessage.addListener((msg: { type: string; [k: string]: unknown 
         return false;
       }
       menu.close();
-      fillGroup(g, msg.values as FillValues).then(reply, () => reply({ ok: false }));
+      fillingUntil = Infinity;
+      fillGroup(g, msg.values as FillValues)
+        .then(reply, () => reply({ ok: false }))
+        .finally(() => (fillingUntil = Date.now() + 500));
       return true;
     }
     case "fill-target": {

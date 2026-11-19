@@ -108,6 +108,13 @@ impl Vault {
     /// Syncs with the S3 folder. Safe to call any time; a failed sync
     /// leaves everything to be tried again next time.
     pub async fn sync<T: Transport>(&mut self, transport: &T) -> Result<SyncReport> {
+        self.sync_with_progress(transport, &mut |_, _| {}).await
+    }
+
+    /// [`Vault::sync`], telling `progress(done, total)` how many of the
+    /// items to download have come so far (first with `done` 0, and only when
+    /// there are some: on joining a vault, all of them).
+    pub async fn sync_with_progress<T: Transport>(&mut self, transport: &T, progress: &mut dyn FnMut(usize, usize)) -> Result<SyncReport> {
         let location = self.config.location();
         let credentials = self.s.credentials.for_client();
         let client = Client::new(&location, &credentials, transport);
@@ -115,7 +122,7 @@ impl Vault {
 
         self.sync_header(&client, &mut report).await?;
         self.empty_old_trash(Utc::now());
-        self.pull(&client, &mut report).await?;
+        self.pull(&client, &mut report, progress).await?;
         self.push(&client, &mut report).await?;
         self.clean_tombstones(&client).await;
 
@@ -174,23 +181,31 @@ impl Vault {
         Ok(())
     }
 
-    async fn pull<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport) -> Result<()> {
+    async fn pull<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport, progress: &mut dyn FnMut(usize, usize)) -> Result<()> {
         let listed = client.list(ITEMS_PREFIX).await?;
         let mut present = std::collections::HashSet::new();
+        let mut todo = Vec::new();
         for l in &listed {
             let Some(id) = item_id(&l.name) else { continue };
             present.insert(id.to_owned());
             let known = self.s.items.get(id).and_then(|s| s.etag.as_deref()) == Some(l.etag.as_str())
                 || self.s.tombstones.get(id).and_then(|g| g.etag.as_deref()) == Some(l.etag.as_str())
                 || self.s.purges.contains_key(id);
-            if known {
-                continue;
+            if !known {
+                todo.push((l.name.as_str(), id));
             }
-            let Some(obj) = client.get(&l.name).await? else { continue };
-            match open_object(&self.key, &self.header.vault_id, id, &obj.data) {
-                None => report.unreadable += 1,
-                Some(stored) => self.take_remote(id, stored, obj.etag, report),
+        }
+        if !todo.is_empty() {
+            progress(0, todo.len());
+        }
+        for (n, &(name, id)) in todo.iter().enumerate() {
+            if let Some(obj) = client.get(name).await? {
+                match open_object(&self.key, &self.header.vault_id, id, &obj.data) {
+                    None => report.unreadable += 1,
+                    Some(stored) => self.take_remote(id, stored, obj.etag, report),
+                }
             }
+            progress(n + 1, todo.len());
         }
         // Gone from S3 altogether (a tombstone cleaned up, or deleted by
         // hand): delete here too, unless changed here.
@@ -364,6 +379,18 @@ mod tests {
         assert_eq!(b.get(&id).unwrap().password, "pw1");
         // Nothing changed: nothing downloaded again.
         assert_eq!(block_on(b.sync(&s3)).unwrap(), SyncReport::default());
+
+        // A device joining now hears of each download.
+        let mut c = {
+            let (h, etag) = block_on(fetch_header(&s3, &config(), &creds())).unwrap().unwrap();
+            Vault::join(config(), creds(), h, etag, PW).unwrap()
+        };
+        let mut seen = Vec::new();
+        block_on(c.sync_with_progress(&s3, &mut |done, total| seen.push((done, total)))).unwrap();
+        assert_eq!(seen, [(0, 3), (1, 3), (2, 3), (3, 3)]);
+        let mut seen = Vec::new();
+        block_on(c.sync_with_progress(&s3, &mut |done, total| seen.push((done, total)))).unwrap();
+        assert!(seen.is_empty(), "nothing to download: no progress");
 
         // Nothing readable in the bucket.
         for (k, (data, _)) in s3.objects.borrow().iter() {

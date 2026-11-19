@@ -148,7 +148,10 @@ async function syncNow(): Promise<typeof lastSync> {
   return exclusive(async () => {
     if (!session) return lastSync;
     try {
-      const report = (await session.sync(s3fetch)) as SyncReport;
+      // How the download goes, for the popup (on joining a vault, it's
+      // every item).
+      const progress = (done: number, total: number) => void chrome.runtime.sendMessage({ type: "sync-progress", done, total }).catch(() => {});
+      const report = (await session.sync(s3fetch, progress)) as SyncReport;
       lastSync = { at: new Date().toISOString(), error: null, report };
       await persist();
     } catch (e) {
@@ -237,6 +240,32 @@ interface MenuCtx {
   created: number;
 }
 const menus = new Map<string, MenuCtx>();
+// Kept in session storage too: Chrome stops this worker after half a minute
+// of quiet, and a menu still open on the page would then click to "expired".
+const menusReady = chrome.storage.session
+  .get("menus")
+  .then(({ menus: saved }) => {
+    for (const [k, v] of Object.entries((saved ?? {}) as Record<string, MenuCtx>)) if (!menus.has(k)) menus.set(k, v);
+  })
+  .catch(() => {});
+function saveMenus(): void {
+  void chrome.storage.session.set({ menus: Object.fromEntries(menus) }).catch(() => {});
+}
+
+/** The same login saved more than once (same user name, password and code),
+ *  once: under the name used here before, or else the shortest, in the place
+ *  of the best match. */
+function unique(s: core.Session, matches: Match[], preferredId: string | null): Match[] {
+  const byLogin = new Map<string, Match>();
+  for (const m of matches) {
+    const item = s.get(m.id) as Item | undefined;
+    const key = item ? JSON.stringify([m.username.trim().toLowerCase(), item.password, item.totp]) : m.id;
+    const prev = byLogin.get(key);
+    if (!prev) byLogin.set(key, m);
+    else if (prev.id !== preferredId && (m.id === preferredId || m.name.length < prev.name.length)) byLogin.set(key, { ...m, quality: prev.quality });
+  }
+  return [...byLogin.values()];
+}
 
 function token(): string {
   const b = crypto.getRandomValues(new Uint8Array(16));
@@ -623,10 +652,11 @@ async function fromPage(msg: Msg, sender: chrome.runtime.MessageSender): Promise
       menus.set(t, { frame, role, kind, groupId: String(msg.groupId), embeddedIn, suggestion, created: Date.now() });
       // Old tokens go.
       for (const [k, m] of menus) if (Date.now() - m.created > 30 * 60_000) menus.delete(k);
+      saveMenus();
       return { token: t };
     }
     case "menu-closed":
-      menus.delete(String(msg.token));
+      if (menus.delete(String(msg.token))) saveMenus();
       return null;
     case "webauthn":
       return webauthn(frame, msg);
@@ -803,7 +833,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "tab-matches": {
       const tab = await activeTab();
       const url = tab?.url ?? "";
-      return { host: hostOf(url), matches: /^https?:/.test(url) ? s.matches(url) : [], pending: tab?.id ? pendingSaves.get(tab.id) ?? null : null };
+      return { host: hostOf(url), matches: /^https?:/.test(url) ? unique(s, s.matches(url) as Match[], tab?.id ? tabLogin(tab.id, url) : null) : [], pending: tab?.id ? pendingSaves.get(tab.id) ?? null : null };
     }
     case "tab-fill": {
       // From the popup (a user gesture): fill the page's focused (or first)
@@ -826,7 +856,8 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "menu-state": {
       const m = menus.get(String(msg.token));
       if (!m || sender.tab?.id !== m.frame.tabId) return null;
-      const matches = (session ? (s.matches(m.frame.url) as Match[]) : []).filter(() => m.role !== "new-password" || m.kind === "change-password");
+      const preferredId = tabLogin(m.frame.tabId, m.frame.url);
+      const matches = (session ? unique(s, s.matches(m.frame.url) as Match[], preferredId) : []).filter(() => m.role !== "new-password" || m.kind === "change-password");
       const state: MenuState = {
         locked: false,
         role: m.role,
@@ -835,7 +866,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
         matches,
         embeddedIn: m.embeddedIn,
         suggestion: m.suggestion,
-        preferredId: tabLogin(m.frame.tabId, m.frame.url),
+        preferredId,
         totpIds: matches.filter((x) => !!(s.get(x.id) as Item | undefined)?.totp).map((x) => x.id),
         passkeys: m.role === "username" || m.role === "current-password" ? conditionalChoices(m.frame) : [],
       };
@@ -909,6 +940,7 @@ chrome.runtime.onMessage.addListener((msg: Msg, sender, reply) => {
   if (sender.id !== chrome.runtime.id || typeof msg?.type !== "string") return false;
   const fromOurPage = sender.url?.startsWith(EXT_ORIGIN + "/") ?? false;
   const handle = async () => {
+    await menusReady;
     if (!fromOurPage) return fromPage(msg, sender);
     await restore();
     if (!session && msg.type.startsWith("menu-")) return lockedMenu(msg, sender);
