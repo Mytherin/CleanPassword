@@ -125,7 +125,8 @@ const browser = await puppeteer.launch({
   executablePath: chrome,
   headless: true,
   enableExtensions: [ext],
-  args: ["--no-first-run", "--no-default-browser-check", "--window-size=1200,900"],
+  // *.example.com: two hosts of one domain (www and signin.cloud), on the same server.
+  args: ["--no-first-run", "--no-default-browser-check", "--window-size=1200,900", "--host-resolver-rules=MAP *.example.com 127.0.0.1"],
   defaultViewport: { width: 1200, height: 900 },
 });
 
@@ -297,6 +298,38 @@ try {
     const items = await ask("items");
     check("saves it", items.some((i) => i.username === "carol@example.com" && i.password === "typed-by-hand-1"));
   }
+
+  // The same user name with another password on another host of the domain
+  // (www.amazon.com and signin.aws.amazon.com): another account, saved as a
+  // new login. On the login's own host, the same is a password change.
+  const port = web.address().port;
+  const shopId = await ask("add", { data: { kind: "login", name: "Shop", username: "dana@example.com", password: "shop-pass-1", uris: [{ uri: `http://www.example.com:${port}` }], totp: "", notes: "", folder: "", favorite: false, fields: [] } });
+  async function signIn(host, password) {
+    await tab.goto(`http://${host}:${port}/login`);
+    await sleep(500);
+    await tab.type("#u", "dana@example.com");
+    await tab.type("#p", password);
+    await tab.keyboard.press("Escape");
+    await Promise.all([tab.waitForNavigation(), tab.click("button[type=submit]")]);
+    const f = await waitForFrame(tab, "prompt.html", 8000);
+    if (!f) return null;
+    await f.waitForSelector(".btn.primary");
+    const label = await f.$eval(".btn.primary", (e) => e.textContent);
+    await sleep(700);
+    await f.click(".btn.primary");
+    await sleep(500);
+    return label;
+  }
+  const otherHost = await signIn("signin.cloud.example.com", "cloud-pass-2");
+  let dana = await ask("items");
+  check(
+    "a login with the same user name on another host is saved as a new login",
+    otherHost === "Save" && dana.find((i) => i.id === shopId)?.password === "shop-pass-1" && dana.some((i) => i.id !== shopId && i.username === "dana@example.com" && i.password === "cloud-pass-2"),
+    JSON.stringify({ otherHost, passwords: dana.filter((i) => i.username === "dana@example.com").map((i) => i.password) }),
+  );
+  const sameHost = await signIn("www.example.com", "shop-pass-3");
+  dana = await ask("items");
+  check("on the login's own host, a new password updates it", sameHost === "Update" && dana.find((i) => i.id === shopId)?.password === "shop-pass-3", JSON.stringify({ sameHost, shop: dana.find((i) => i.id === shopId)?.password }));
 
   // What S3 holds.
   await ask("sync");

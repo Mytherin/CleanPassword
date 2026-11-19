@@ -406,7 +406,14 @@ async function submitted(frame: FrameRef, s: Submission): Promise<void> {
   const matches = (session.siteLogins(frame.url) as Match[]).filter((m) => m.quality !== "related");
   const items = matches.map((m) => session!.get(m.id) as Item);
   let target: Item | undefined;
-  if (username) target = items.find((i) => i.username.toLowerCase() === username.toLowerCase());
+  if (username) {
+    // The same user name on another host of the domain is often another
+    // account (www.amazon.com and signin.aws.amazon.com): only a login saved
+    // for this host is updated; elsewhere, only an exact match counts (as
+    // already saved), and a different password is saved as a new login.
+    const sameUser = (i: Item) => i.username.toLowerCase() === username.toLowerCase();
+    target = items.find((i, n) => matches[n].quality === "host" && sameUser(i)) ?? items.find((i) => sameUser(i) && i.password === password);
+  }
   // A change-password form without a user name: the login whose password
   // was entered as the current one, else the one used in this tab.
   if (!target && s.newPassword && s.password) target = items.find((i) => i.password === s.password);
