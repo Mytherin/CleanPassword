@@ -128,7 +128,7 @@ function choosePassword(config: S3Config, credentials: Credentials, exists: bool
   const form = h("form", { class: "form" },
     exists
       ? h("p", { class: "muted" }, `There's a vault in ${config.bucket}/${config.prefix}. Enter its master password to use it here.`)
-      : h("p", { class: "muted" }, "Choose a master password: at least 12 characters, ideally a few unrelated words. It can't be recovered if you forget it."),
+      : h("p", { class: "muted" }, "Choose a master password: at least 10 characters, ideally a few unrelated words. It can't be recovered if you forget it."),
     h("label", {}, "Master password", pw),
     exists ? null : meter.el,
     exists ? null : h("label", {}, "Confirm", again),

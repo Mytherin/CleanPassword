@@ -29,8 +29,10 @@ use crate::item::{Item, ItemData, ItemKind};
 use crate::matching::{self, Quality};
 use crate::{Error, Result};
 
-/// The shortest master password allowed (as in Bitwarden).
-pub const MIN_MASTER_PASSWORD: usize = 12;
+/// The shortest master password allowed. Length alone doesn't make a
+/// password strong (the setup screens show a strength meter); this keeps
+/// out the shortest ones, which fall quickly to offline guessing.
+pub const MIN_MASTER_PASSWORD: usize = 10;
 /// Items stay in the trash this long.
 pub const TRASH_DAYS: i64 = 30;
 
@@ -600,6 +602,8 @@ pub(crate) mod tests {
     #[test]
     fn master_password_rules() {
         assert!(Vault::create(config(), creds(), "short").is_err());
+        assert!(Vault::create(config(), creds(), "123456789").is_err(), "9 characters");
+        assert!(Vault::create(config(), creds(), "1234567890").is_ok(), "10 characters");
         let mut v = Vault::create(config(), creds(), PW).unwrap();
         assert!(matches!(v.change_master_password("not the password", "another long password"), Err(Error::WrongPassword)));
         v.change_master_password(PW, "another long password").unwrap();

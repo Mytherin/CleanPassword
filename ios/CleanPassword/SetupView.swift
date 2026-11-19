@@ -95,7 +95,7 @@ struct MasterPasswordView: View {
                 if found.remote != nil {
                     Text("There's a vault in \(found.settings.bucket)/\(found.settings.prefix). Enter its master password.")
                 } else {
-                    Text("Choose a master password: at least 12 characters, ideally a few unrelated words. It can't be recovered if you forget it.")
+                    Text("Choose a master password: at least 10 characters, ideally a few unrelated words. It can't be recovered if you forget it.")
                 }
             }
             .font(.callout).foregroundStyle(.secondary)

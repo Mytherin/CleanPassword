@@ -93,7 +93,7 @@ They can't read or forge items. Turn on **S3 versioning**, so a deleted or overw
 - Hidden fields are never filled.
 - The menu refuses to show, or closes, when the page is see-through, covered, or fighting for the top layer. Clicks count only once Chrome has reported the menu fully visible for 500 ms, which defends against the 2025 "DOM-based extension clickjacking" attacks.
 
-**Master password.** At least 12 characters. It can't be recovered: there's no server, and no one else holds a key.
+**Master password.** At least 10 characters, ideally a few unrelated words (the setup screens show how strong it is). It can't be recovered: there's no server, and no one else holds a key.
 
 ## Setting up AWS
 
