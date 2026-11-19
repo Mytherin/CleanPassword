@@ -188,6 +188,13 @@ pub(crate) struct Secrets {
     /// uploading.
     #[serde(default)]
     pub header_dirty: bool,
+    /// `vault-head`'s ETag as of the last full listing (see
+    /// [`crate::sync`]): unchanged, nothing was written since.
+    #[serde(default)]
+    pub head_cursor: Option<String>,
+    /// When the folder was last listed in full.
+    #[serde(default)]
+    pub listed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -561,7 +568,7 @@ impl Vault {
 
 impl Secrets {
     fn new(credentials: AwsCredentials) -> Secrets {
-        Secrets { credentials, items: BTreeMap::new(), purges: BTreeMap::new(), tombstones: BTreeMap::new(), header_etag: None, header_dirty: false }
+        Secrets { credentials, items: BTreeMap::new(), purges: BTreeMap::new(), tombstones: BTreeMap::new(), header_etag: None, header_dirty: false, head_cursor: None, listed_at: None }
     }
 }
 

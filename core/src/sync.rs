@@ -16,6 +16,14 @@
 //!   are removed after 30 days.
 //! - Objects that can't be decrypted (another key, damaged) are left alone
 //!   and counted, never deleted.
+//! - **`vault-head`**, a small object rewritten (`touch`) after every write,
+//!   by CleanPassword and by CleanNotes' vault view alike, makes a sync with
+//!   nothing to do a single `HEAD`: when nothing here waits to be sent, the
+//!   folder was listed less than 15 minutes ago, and `vault-head`'s ETag is
+//!   the one seen then, nothing changed. Otherwise the folder is listed as
+//!   above, and the ETag read *before* listing is kept, so a write made
+//!   meanwhile (by anyone, this device included) is seen next time. Without
+//!   a `vault-head` (devices from before it), every sync lists.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -29,6 +37,10 @@ use crate::{Error, Result};
 
 pub const HEADER_OBJECT: &str = "vault.json";
 pub const ITEMS_PREFIX: &str = "items/";
+/// The change marker (not CleanNotes' `head`, which may share the folder).
+pub const HEAD_OBJECT: &str = "vault-head";
+/// The folder is listed in full at least this often.
+const FULL_LIST_EVERY: Duration = Duration::minutes(15);
 /// Sealed objects start with this, then `nonce ‖ ciphertext ‖ tag`.
 const MAGIC: &[u8] = b"CPV1";
 /// Item plaintexts are padded to a multiple of this many bytes.
@@ -120,17 +132,34 @@ impl Vault {
         let client = Client::new(&location, &credentials, transport);
         let mut report = SyncReport::default();
 
-        self.sync_header(&client, &mut report).await?;
         self.empty_old_trash(Utc::now());
+        // Nothing to send, nothing changed in S3: done, with one HEAD.
+        // (If the HEAD fails, the full sync below says why, or works.)
+        let cursor = client.head(HEAD_OBJECT).await.unwrap_or(None);
+        let fresh = self.s.listed_at.is_some_and(|t| Utc::now() - t < FULL_LIST_EVERY);
+        if fresh && cursor.is_some() && cursor == self.s.head_cursor && !self.has_unsynced_changes() {
+            self.last_sync = Some(Utc::now());
+            return Ok(report);
+        }
+
+        let mut wrote = false;
+        self.sync_header(&client, &mut report, &mut wrote).await?;
         self.pull(&client, &mut report, progress).await?;
-        self.push(&client, &mut report).await?;
-        self.clean_tombstones(&client).await;
+        self.s.head_cursor = cursor;
+        self.s.listed_at = Some(Utc::now());
+        self.push(&client, &mut report, &mut wrote).await?;
+        self.clean_tombstones(&client, &mut wrote).await;
+        if wrote {
+            // Other devices notice with one HEAD. (Best effort: they list in
+            // full every 15 minutes anyway.)
+            let _ = client.touch(HEAD_OBJECT).await;
+        }
 
         self.last_sync = Some(Utc::now());
         Ok(report)
     }
 
-    async fn sync_header<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport) -> Result<()> {
+    async fn sync_header<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport, wrote: &mut bool) -> Result<()> {
         let remote = client.get(HEADER_OBJECT).await?;
         match remote {
             None => {
@@ -148,6 +177,7 @@ impl Vault {
                     Put::Stored { etag } => {
                         self.s.header_etag = Some(etag);
                         self.s.header_dirty = false;
+                        *wrote = true;
                     }
                     // Another device made a vault here at the same moment.
                     Put::Conflict => return Err(Error::DifferentVault),
@@ -174,6 +204,7 @@ impl Vault {
                     if let Put::Stored { etag } = client.put(HEADER_OBJECT, body, Cond::Match(&obj.etag)).await? {
                         self.s.header_etag = Some(etag);
                         self.s.header_dirty = false;
+                        *wrote = true;
                     }
                 }
             }
@@ -263,7 +294,7 @@ impl Vault {
         }
     }
 
-    async fn push<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport) -> Result<()> {
+    async fn push<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport, wrote: &mut bool) -> Result<()> {
         let vault_id = self.header.vault_id.clone();
         let dirty: Vec<String> = self.s.items.iter().filter(|(_, s)| s.dirty).map(|(id, _)| id.clone()).collect();
         for id in dirty {
@@ -281,6 +312,7 @@ impl Vault {
                         st.dirty = false;
                         self.s.tombstones.remove(&id);
                         report.uploaded += 1;
+                        *wrote = true;
                         done = true;
                         break;
                     }
@@ -313,6 +345,7 @@ impl Vault {
                 Put::Stored { etag } => {
                     self.s.purges.remove(&id);
                     self.s.tombstones.insert(id, Gone { etag: Some(etag), at: gone.at });
+                    *wrote = true;
                 }
                 Put::Conflict => {
                     // Changed elsewhere since: that edit beats the delete.
@@ -329,12 +362,13 @@ impl Vault {
     }
 
     /// Removes tombstones every device has had [`TRASH_DAYS`] to see.
-    async fn clean_tombstones<T: Transport>(&mut self, client: &Client<'_, T>) {
+    async fn clean_tombstones<T: Transport>(&mut self, client: &Client<'_, T>, wrote: &mut bool) {
         let cutoff = Utc::now() - Duration::days(TRASH_DAYS);
         let old: Vec<String> = self.s.tombstones.iter().filter(|(_, g)| g.at < cutoff).map(|(id, _)| id.clone()).collect();
         for id in old {
             if client.delete(&item_name(&id)).await.is_ok() {
                 self.s.tombstones.remove(&id);
+                *wrote = true;
             }
         }
     }
@@ -552,6 +586,54 @@ mod tests {
         assert_eq!(b.items().len(), 1);
     }
 
+    /// With nothing to do, a sync is a single HEAD of `vault-head`; a write
+    /// by another device (which touches it) is seen at once; a change here
+    /// is still sent; and the folder is listed after 15 minutes, or always
+    /// when there's no `vault-head` (devices from before it).
+    #[test]
+    fn idle_syncs_are_one_request() {
+        let (s3, mut a, mut b) = setup();
+        a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        assert!(s3.objects.borrow().contains_key("Vault/vault-head"), "touched after writing");
+        let idle = |v: &mut Vault| {
+            block_on(v.sync(&s3)).unwrap();
+            s3.requests.borrow_mut().clear();
+            let r = block_on(v.sync(&s3)).unwrap();
+            (r, s3.requests.borrow().clone())
+        };
+        let (r, requests) = idle(&mut b);
+        assert_eq!(b.items().len(), 1);
+        assert_eq!(r, SyncReport::default());
+        assert_eq!(requests, vec!["HEAD Vault/vault-head".to_string()]);
+        // The writer itself lists once more (its own write moved the
+        // marker after it listed), then is idle too.
+        assert_eq!(idle(&mut a).1.len(), 1);
+
+        // Another device's write: seen on the next sync.
+        a.add(login("Y", "https://y.com", "me", "2")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        assert_eq!(block_on(b.sync(&s3)).unwrap().downloaded, 1);
+
+        // A change here goes out although nothing moved in S3.
+        let x = b.items().into_iter().find(|i| i.name == "X").unwrap().id.clone();
+        b.update(&x, ItemData { notes: "edited".into(), ..b.get(&x).unwrap().data() }).unwrap();
+        assert_eq!(block_on(b.sync(&s3)).unwrap().uploaded, 1);
+        assert_eq!(block_on(a.sync(&s3)).unwrap().downloaded, 1);
+
+        // 15 minutes on: listed in full, though nothing moved.
+        assert_eq!(idle(&mut b).1.len(), 1);
+        b.s.listed_at = Some(Utc::now() - Duration::minutes(16));
+        s3.requests.borrow_mut().clear();
+        block_on(b.sync(&s3)).unwrap();
+        assert!(s3.requests.borrow().len() > 1, "listed");
+
+        // No vault-head: every sync lists.
+        s3.objects.borrow_mut().remove("Vault/vault-head");
+        let (_, requests) = idle(&mut b);
+        assert!(requests.len() > 1, "{requests:?}");
+    }
+
     /// A vault written before the S3 client and sealing moved to the shared
     /// `cleanbucket` crate (testdata/, written by a0d74c6): the device's
     /// saved copy unlocks, another device joins from its S3 objects, both
@@ -629,7 +711,7 @@ mod tests {
         for k in notes {
             assert_eq!(objects[k], (b"CleanNotes data".to_vec(), format!("\"{k}\"")), "{k} untouched");
         }
-        assert!(objects.keys().all(|k| notes.contains(&k.as_str()) || k == "Vault/vault.json" || k.starts_with("Vault/items/")));
+        assert!(objects.keys().all(|k| notes.contains(&k.as_str()) || k == "Vault/vault.json" || k == "Vault/vault-head" || k.starts_with("Vault/items/")));
     }
 
     #[test]

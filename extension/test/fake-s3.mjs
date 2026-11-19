@@ -1,4 +1,4 @@
-// Enough of S3 for the extension's tests: path-style objects with ETags,
+// Enough of S3 for the extension's tests: path-style objects with ETags (HEAD too),
 // conditional PUTs (If-Match / If-None-Match), DELETE and ListObjectsV2.
 // Requests must be signed (an AWS4-HMAC-SHA256 Authorization header), but
 // signatures aren't checked.
@@ -31,6 +31,10 @@ export function startFakeS3() {
           .map((k) => `<Contents><Key>${k.slice(bucket.length + 1)}</Key><LastModified>2024-01-01T00:00:00.000Z</LastModified><ETag>${objects.get(k).etag.replaceAll('"', "&quot;")}</ETag></Contents>`)
           .join("");
         return send(200, `<ListBucketResult>${xml}<IsTruncated>false</IsTruncated></ListBucketResult>`);
+      }
+      if (req.method === "HEAD") {
+        const o = objects.get(full);
+        return o ? send(200, "", { etag: o.etag }) : send(404);
       }
       if (req.method === "GET") {
         const o = objects.get(full);
