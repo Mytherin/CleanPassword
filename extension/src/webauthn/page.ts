@@ -22,7 +22,9 @@ type Json = Record<string, unknown>;
   // ---- base64url ---------------------------------------------------------
 
   function toB64(src: BufferSource): string {
-    const bytes = src instanceof ArrayBuffer ? new Uint8Array(src) : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+    // Not `instanceof ArrayBuffer`: a buffer from another frame (realm) isn't
+    // one, and would come out empty.
+    const bytes = ArrayBuffer.isView(src) ? new Uint8Array(src.buffer, src.byteOffset, src.byteLength) : new Uint8Array(src);
     let s = "";
     for (const b of bytes) s += String.fromCharCode(b);
     return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

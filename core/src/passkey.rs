@@ -168,6 +168,18 @@ pub fn rp_id_allowed(rp_id: &str, origin: &str) -> bool {
     local || host == rp && rp.parse::<std::net::IpAddr>().is_ok() || psl::domain_str(&rp).is_some()
 }
 
+/// Which login a new passkey is saved on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasskeyTarget<'a> {
+    /// The one already holding a passkey for the account, else a login for
+    /// the site with the same user name (or none), else a new login.
+    Auto,
+    /// The login the user chose.
+    Item(&'a str),
+    /// A new login (the user chose that).
+    New,
+}
+
 /// A passkey offered for signing in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PasskeyChoice {
@@ -246,6 +258,13 @@ impl Vault {
     /// account (which is replaced), else a login for the site with the same
     /// user name (or none), else a new login.
     pub fn create_passkey(&mut self, req: &NewPasskey, item_id: Option<&str>) -> Result<Registration> {
+        self.create_passkey_on(req, item_id.map_or(PasskeyTarget::Auto, PasskeyTarget::Item))
+    }
+
+    /// Creates a passkey and saves it where `target` says. An earlier
+    /// passkey for the same account and site, on any login, is replaced (as
+    /// authenticators do: the site keeps one credential per account).
+    pub fn create_passkey_on(&mut self, req: &NewPasskey, target: PasskeyTarget<'_>) -> Result<Registration> {
         let rp_id = req.rp_id.trim().to_ascii_lowercase();
         if rp_id.is_empty() || req.user_handle.is_empty() || req.user_handle.len() > 64 {
             return Err(Error::invalid("the site's passkey request is invalid"));
@@ -266,9 +285,10 @@ impl Vault {
             created: Utc::now(),
         };
         let handle = b64url(&req.user_handle);
-        let target = match item_id {
-            Some(id) => Some(self.get(id).ok_or(Error::NotFound)?.id.clone()),
-            None => self
+        let target = match target {
+            PasskeyTarget::Item(id) => Some(self.get(id).ok_or(Error::NotFound)?.id.clone()),
+            PasskeyTarget::New => None,
+            PasskeyTarget::Auto => self
                 .items()
                 .into_iter()
                 .find(|i| i.passkeys.iter().any(|p| p.rp_id == rp_id && p.user_handle == handle))
@@ -283,11 +303,18 @@ impl Vault {
                 .map(|i| i.id.clone()),
         };
         let now = Utc::now();
+        // One passkey per account and site: a new one replaces it, wherever
+        // it was kept.
+        for item in self.s.items.values_mut() {
+            let before = item.passkeys.len();
+            item.passkeys.retain(|p| !(p.rp_id == rp_id && p.user_handle == handle));
+            if item.passkeys.len() != before {
+                item.modified = now;
+            }
+        }
         let item_id = match target {
             Some(id) => {
                 let item = self.s.items.get_mut(&id).expect("found above");
-                // One passkey per account and site: a new one replaces it.
-                item.passkeys.retain(|p| !(p.rp_id == rp_id && p.user_handle == handle));
                 item.passkeys.push(passkey);
                 if item.username.is_empty() {
                     item.username = req.user_name.clone();
@@ -315,7 +342,8 @@ impl Vault {
         if client_data_hash.len() != 32 {
             return Err(Error::invalid("the client data hash must be 32 bytes"));
         }
-        let item = self.s.items.get_mut(item_id).ok_or(Error::NotFound)?;
+        // Not from the trash (it isn't offered either).
+        let item = self.s.items.get_mut(item_id).filter(|i| i.deleted.is_none()).ok_or(Error::NotFound)?;
         let p = item
             .passkeys
             .iter_mut()
@@ -325,7 +353,9 @@ impl Vault {
             return Err(Error::invalid("this passkey belongs to another site"));
         }
         let sk = signing_key(p)?;
-        if p.counter > 0 {
+        // At the top it stays there: wrapping to 0 would look like a cloned
+        // key to the site.
+        if p.counter > 0 && p.counter < u32::MAX {
             p.counter += 1;
         }
         let data = auth_data(&p.rp_id, UP | UV | BE | BS, p.counter, None);
@@ -480,6 +510,46 @@ mod tests {
         assert!(v.get(&other).unwrap().passkeys.is_empty());
     }
 
+    /// "A new login", when the user chose it, is a new login: not one for
+    /// the site without a user name (whose user name would be overwritten).
+    #[test]
+    fn a_new_login_when_chosen() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let blank = v.add(login("Example", "https://example.com", "", "pw")).unwrap();
+        let r = v.create_passkey_on(&request("alice"), PasskeyTarget::New).unwrap();
+        assert_ne!(r.item_id, blank);
+        assert_eq!(v.get(&blank).unwrap().username, "", "untouched");
+        assert!(v.get(&blank).unwrap().passkeys.is_empty());
+        assert_eq!(v.get(&r.item_id).unwrap().username, "alice@example.com");
+    }
+
+    /// A new passkey for an account replaces the one before, even when it's
+    /// saved on another login: the site keeps only the newest.
+    #[test]
+    fn a_new_passkey_replaces_the_accounts_old_one_everywhere() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let first = v.create_passkey_on(&request("alice"), PasskeyTarget::New).unwrap();
+        let other = v.add(login("Other", "https://example.com", "someone", "pw")).unwrap();
+        let second = v.create_passkey_on(&request("alice"), PasskeyTarget::Item(&other)).unwrap();
+        assert!(v.get(&first.item_id).unwrap().passkeys.is_empty());
+        assert_eq!(v.passkeys_for("example.com", &[]).len(), 1);
+        assert_eq!(v.passkeys_for("example.com", &[])[0].item_id, second.item_id);
+        // Bob's isn't touched.
+        v.create_passkey_on(&request("bob"), PasskeyTarget::New).unwrap();
+        assert_eq!(v.passkeys_for("example.com", &[]).len(), 2);
+    }
+
+    #[test]
+    fn no_signing_in_from_the_trash() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let r = v.create_passkey(&request("alice"), None).unwrap();
+        v.delete(&r.item_id).unwrap();
+        assert!(v.passkeys_for("example.com", &[]).is_empty());
+        assert!(matches!(v.assert_passkey(&r.item_id, &r.credential_id, "example.com", &[1; 32]), Err(Error::NotFound)));
+        v.restore(&r.item_id).unwrap();
+        assert!(v.assert_passkey(&r.item_id, &r.credential_id, "example.com", &[1; 32]).is_ok());
+    }
+
     #[test]
     fn counters_count_only_if_they_did() {
         let mut v = Vault::create(config(), creds(), PW).unwrap();
@@ -490,6 +560,9 @@ mod tests {
         v.s.items.get_mut(&r.item_id).unwrap().passkeys[0].counter = 41;
         let s = v.assert_passkey(&r.item_id, &r.credential_id, "example.com", &cdh).unwrap();
         assert_eq!(&s.authenticator_data[33..37], &[0, 0, 0, 42]);
+        v.s.items.get_mut(&r.item_id).unwrap().passkeys[0].counter = u32::MAX;
+        let s = v.assert_passkey(&r.item_id, &r.credential_id, "example.com", &cdh).unwrap();
+        assert_eq!(&s.authenticator_data[33..37], &[0xff; 4], "no wrapping to 0");
     }
 
     #[test]

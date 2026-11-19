@@ -82,6 +82,19 @@ const pages = {
         return results.get;
       };
     </script>`,
+  // A sign-in form in a modal dialog (everything outside it is inert).
+  "/dialog": `<!doctype html><title>Dialog</title><p>Behind the dialog.</p>
+    <dialog id="d"><form method="dialog"><input id="u" autocomplete="username"><input id="p" type="password"><button>Sign in</button></form></dialog>
+    <script>document.getElementById("d").showModal();</script>`,
+  // A page with a popover that stays open (a toast, a cookie banner).
+  "/popover": `<!doctype html><title>Popover</title><div id="toast" popover="manual" style="inset:auto 8px 8px auto">Cookies!</div>
+    <form><input id="u" autocomplete="username"><input id="p" type="password"><button>Sign in</button></form>
+    <script>document.getElementById("toast").showPopover();</script>`,
+  // A sign-in form inside a web component's closed shadow root.
+  "/shadow": `<!doctype html><title>Shadow</title><login-box style="display:block;width:300px"></login-box>
+    <script>customElements.define("login-box", class extends HTMLElement { constructor() { super();
+      window.sr = this.attachShadow({ mode: "closed" });
+      sr.innerHTML = '<form><input id="u" autocomplete="username" style="display:block;width:280px;height:30px"><input id="p" type="password" style="display:block;width:280px;height:30px"><button>Sign in</button></form>'; } });</script>`,
   "/faded": `<!doctype html><title>Faded</title><style>html{opacity:.5}</style>
     <form><input id="u" autocomplete="username"><input id="p" type="password"><button>Sign in</button></form>`,
 };
@@ -248,6 +261,23 @@ try {
     const items = await ask("items");
     const saved = items.find((i) => i.password === v[0]);
     check("saves the generated password at once, with the user name", !!saved && saved.username === "bob@example.com", JSON.stringify(saved));
+
+    // Another sign-up in the same tab, the user name not typed yet: another
+    // account, so bob's login keeps its password.
+    await tab.goto(`${WEB}/signup`);
+    await sleep(500);
+    await tab.click("#np");
+    const gen2 = await waitForFrame(tab, "menu.html");
+    if (gen2) {
+      await gen2.waitForSelector(".row.suggest");
+      await sleep(700);
+      await gen2.click(".row.suggest");
+      await sleep(800);
+      const v2 = await tab.$eval("#np", (e) => e.value);
+      const after = await ask("items");
+      const bob = after.find((i) => i.id === saved?.id);
+      check("a second sign-up doesn't replace the first account's password", bob?.password === v[0] && after.some((i) => i.password === v2 && i.id !== saved?.id), JSON.stringify(bob));
+    } else check("a second sign-up doesn't replace the first account's password", false, "no menu");
   }
 
   // Saving a login typed by hand.
@@ -333,6 +363,28 @@ try {
       const viaMenu = await tab.evaluate(() => Promise.race([window.conditional, new Promise((r) => setTimeout(() => r(null), 4000))]));
       check("and signs in with it from there", !!viaMenu && verifyAssertion(viaMenu, created.publicKey, LOCAL));
     } else check("offers the passkey in the sign-in field's menu", false);
+
+    // The page asks, is reloaded before an answer, and asks again: the
+    // menu answers the page now showing (not the one before).
+    await tab.goto(`${LOCAL}/passkey`);
+    await sleep(300);
+    await tab.evaluate(() => void window.login("conditional").catch(() => {}));
+    await sleep(300);
+    await tab.reload();
+    await sleep(300);
+    await tab.evaluate(() => {
+      window.conditional = window.login("conditional");
+    });
+    await sleep(300);
+    await tab.click("#u");
+    const again = await waitForFrame(tab, "menu.html");
+    const againRow = again && (await again.waitForSelector(".row.passkey", { timeout: 4000 }).catch(() => null));
+    if (againRow) {
+      await sleep(700);
+      await againRow.click();
+    }
+    const afterReload = await tab.evaluate(() => Promise.race([window.conditional, new Promise((r) => setTimeout(() => r(null), 4000))]));
+    check("signs in from the menu after the page was reloaded", !!afterReload && verifyAssertion(afterReload, created.publicKey, LOCAL));
   }
 
   // Locked: the menu offers unlocking.
@@ -349,6 +401,85 @@ try {
   check("refuses a wrong master password", unlocked.ok === false && unlocked.name === "WrongPassword", JSON.stringify(unlocked));
   await ask("unlock", { password: "correct horse battery staple" });
   check("unlocks with the right one", (await ask("state")).state === "unlocked");
+
+  // The menu works, and stays, on pages with a modal dialog or a popover of
+  // their own, and for fields in a closed shadow root.
+  const fillsFromMenu = async (name, path, focus, read) => {
+    await tab.goto(`${WEB}${path}`);
+    await sleep(500);
+    await focus();
+    const f = await waitForFrame(tab, "menu.html");
+    if (!f) return check(name, false, "no menu");
+    await f.waitForSelector(".row");
+    // Longer than the overlay's guard took to give up on such pages.
+    await sleep(2000);
+    if (!tab.frames().includes(f)) return check(name, false, "the menu closed");
+    let picked = false;
+    for (const r of await f.$$(".list .row")) {
+      if ((await r.$eval(".title", (e) => e.textContent)) !== "Test site") continue;
+      await r.click();
+      picked = true;
+      break;
+    }
+    if (!picked) return check(name, false, "no Test site row");
+    await sleep(800);
+    const v = await tab.evaluate(read);
+    check(name, v.u === "alice@example.com" && v.p === "s3cret-Passw0rd", JSON.stringify(v));
+  };
+  const byId = () => ({ u: document.getElementById("u").value, p: document.getElementById("p").value });
+  await fillsFromMenu("fills a sign-in form in a modal dialog", "/dialog", () => tab.click("#u"), byId);
+  await fillsFromMenu("fills on a page with a popover open", "/popover", () => tab.click("#u"), byId);
+  await fillsFromMenu(
+    "fills a sign-in form in a closed shadow root",
+    "/shadow",
+    async () => {
+      const r = await tab.$eval("login-box", (e) => e.getBoundingClientRect().toJSON());
+      await tab.mouse.click(r.x + 20, r.y + 15);
+    },
+    () => ({ u: window.sr.getElementById("u").value, p: window.sr.getElementById("p").value }),
+  );
+
+  // The page can't move the focus into the menu (to have a key press pick a
+  // login it didn't choose).
+  await tab.goto(`${WEB}/login`);
+  await sleep(500);
+  await tab.click("#u");
+  const posted = await waitForFrame(tab, "menu.html");
+  if (posted) {
+    await posted.waitForSelector(".row");
+    await tab.evaluate(() => {
+      for (let i = 0; i < frames.length; i++) frames[i].postMessage({ type: "focus-first" }, "*");
+    });
+    await sleep(300);
+    check("ignores messages the page posts to the menu", !(await posted.evaluate(() => document.activeElement?.classList.contains("row"))));
+  } else check("ignores messages the page posts to the menu", false, "no menu");
+
+  // Many logins: typing filters them, and Enter fills the first one left.
+  for (const n of [1, 2, 3]) {
+    await ask("add", { data: { kind: "login", name: `Extra ${n}`, username: `extra${n}@example.com`, password: `extra-password-${n}`, uris: [{ uri: WEB }], totp: "", notes: "", folder: "", favorite: false, fields: [] } });
+  }
+  await tab.goto(`${WEB}/login`);
+  await sleep(500);
+  await tab.click("#u");
+  const many = await waitForFrame(tab, "menu.html");
+  if (many && (await many.waitForSelector("input.filter", { timeout: 4000 }).catch(() => null))) {
+    await sleep(700);
+    const focused = () => many.evaluate(() => `${document.activeElement?.className}:${document.querySelector("input.filter")?.value}`).catch((e) => String(e));
+    const steps = [];
+    await tab.keyboard.press("ArrowDown");
+    await sleep(200);
+    steps.push(await focused());
+    await tab.keyboard.press("ArrowUp");
+    await sleep(200);
+    steps.push(await focused());
+    await tab.keyboard.type("Extra 2");
+    await sleep(200);
+    steps.push(await focused());
+    await tab.keyboard.press("Enter");
+    await sleep(800);
+    const v = await tab.evaluate(byId);
+    check("Enter in the menu's filter fills the login left", v.u === "extra2@example.com" && v.p === "extra-password-2", JSON.stringify({ v, steps }));
+  } else check("Enter in the menu's filter fills the login left", false, "no menu or no filter");
 
   // A see-through page gets no menu.
   await tab.goto(`${WEB}/faded`);

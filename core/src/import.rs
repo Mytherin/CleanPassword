@@ -370,8 +370,16 @@ pub fn csv(text: &str) -> Result<Imported> {
         let record = record.map_err(|e| Error::Import(format!("line {} of the CSV file is damaged ({e})", n + 2)))?;
         let get = |what: &str| col.get(what).and_then(|i| record.get(*i)).unwrap_or("").to_owned();
         let url = get("url");
-        let uris: Vec<ItemUri> = if bitwarden { url.split(',').map(str::trim).filter(|u| !u.is_empty()).map(ItemUri::new).collect() } else if url.trim().is_empty() { vec![] } else { vec![ItemUri::new(url.trim())] };
-        let kind = if get("type").eq_ignore_ascii_case("note") { ItemKind::Note } else { ItemKind::Login };
+        // LastPass writes its secure notes with the address `http://sn`.
+        let lastpass_note = url.trim().eq_ignore_ascii_case("http://sn");
+        let uris: Vec<ItemUri> = if bitwarden {
+            url.split(',').map(str::trim).filter(|u| !u.is_empty()).map(ItemUri::new).collect()
+        } else if url.trim().is_empty() || lastpass_note {
+            vec![]
+        } else {
+            vec![ItemUri::new(url.trim())]
+        };
+        let kind = if get("type").eq_ignore_ascii_case("note") || lastpass_note { ItemKind::Note } else { ItemKind::Login };
         let mut fields = Vec::new();
         for line in get("fields").lines() {
             if let Some((k, v)) = line.split_once(": ") {
@@ -564,6 +572,19 @@ mod tests {
         let firefox = "\"url\",\"username\",\"password\",\"httpRealm\",\"formActionOrigin\",\"guid\"\n\"https://f.com\",\"u\",\"p\",,\"\",\"{x}\"\n";
         assert_eq!(import_file(firefox, None).unwrap().items[0].data.password, "p");
         assert!(import_file("a,b\n1,2\n", None).is_err());
+    }
+
+    #[test]
+    fn lastpass_secure_notes_are_notes() {
+        let lastpass = "url,username,password,totp,extra,name,grouping,fav\n\
+                        https://l.com,u,p,,,Site,Work,1\n\
+                        http://sn,,,,\"NoteType:Wifi\nSSID:home\",Router,,0\n";
+        let r = import_file(lastpass, None).unwrap();
+        assert_eq!((r.items[0].data.kind, r.items[0].data.uris.len(), r.items[0].data.favorite), (ItemKind::Login, 1, true));
+        let note = &r.items[1].data;
+        assert_eq!((note.kind, note.name.as_str()), (ItemKind::Note, "Router"));
+        assert!(note.uris.is_empty());
+        assert!(note.notes.contains("SSID:home"));
     }
 
     #[test]

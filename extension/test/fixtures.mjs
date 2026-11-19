@@ -66,6 +66,11 @@ export const fixtures = {
       <input id="u" name="login" type="text"><input id="p" type="password"><button>Log in</button></form>`,
     expect: [{ kind: "login", roles: { u: "username", p: "current-password" } }],
   },
+  "a password field pushed off to the right is a honeypot": {
+    html: `<style>html,body{overflow-x:hidden}</style><form><input id="u" name="login" type="text">
+      <input id="trap" type="password" style="position:absolute;left:300vw"><input id="p" type="password"><button>Log in</button></form>`,
+    expect: [{ kind: "login", roles: { u: "username", p: "current-password" } }],
+  },
   "login in a shadow root": {
     html: `<login-box></login-box><script>
       customElements.define("login-box", class extends HTMLElement { constructor() { super(); this.attachShadow({mode: "open"}).innerHTML =

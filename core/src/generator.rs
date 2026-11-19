@@ -124,6 +124,9 @@ fn apple() -> String {
     format!("{}-{}-{}", &s[0..6], &s[6..12], &s[12..18])
 }
 
+/// The longest password made for a site's rules.
+const MAX_SITE_LENGTH: usize = 128;
+
 /// A password for a website: Apple-style when the site's rules (if any)
 /// accept it, otherwise random within its rules, as long as the rules
 /// allow (up to 20 characters by default).
@@ -142,9 +145,12 @@ pub fn generate_with_rules(rules: &Rules) -> String {
         }
     }
     let charset = rules.charset();
-    let len = 20.clamp(rules.min_length.unwrap_or(1), rules.max_length.unwrap_or(usize::MAX).max(1));
-    // Fewer special characters than letters, as people expect (and some
-    // sites' unwritten rules want): letters and digits weigh more.
+    // 20 characters if the rules allow. A page's `passwordrules` attribute
+    // can say anything: a minimum above the maximum (the minimum wins, as
+    // it's what the site checks first), or lengths no one would type.
+    let min = rules.min_length.unwrap_or(1).clamp(1, MAX_SITE_LENGTH);
+    let max = rules.max_length.unwrap_or(usize::MAX).clamp(min, MAX_SITE_LENGTH);
+    let len = 20.clamp(min, max);
     for _ in 0..10_000 {
         let pw: String = (0..len).map(|_| charset[OsRng.gen_range(0..charset.len())]).collect();
         if rules.accepts(&pw) {
@@ -273,6 +279,15 @@ mod tests {
         // Rules Apple-style passwords meet: Apple-style.
         let loose = Rules::parse("minlength: 8; required: lower; required: upper; required: digit;");
         assert_eq!(generate_with_rules(&loose).len(), 20);
+    }
+
+    /// A page's `passwordrules` attribute is the page's to write.
+    #[test]
+    fn odd_site_rules_dont_panic_or_hang() {
+        assert_eq!(generate_with_rules(&Rules::parse("minlength: 30; maxlength: 24; required: digit;")).len(), 30, "the minimum wins");
+        assert_eq!(generate_with_rules(&Rules::parse("minlength: 99999999; required: digit;")).len(), MAX_SITE_LENGTH);
+        assert_eq!(generate_with_rules(&Rules::parse("maxlength: 0; required: digit;")).len(), 1);
+        assert_eq!(generate_with_rules(&Rules::parse("minlength: 0; maxlength: 4; required: digit;")).len(), 4);
     }
 
     #[test]

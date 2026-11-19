@@ -118,7 +118,14 @@ final class ExtensionModel: ObservableObject {
         context()?.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: ASExtensionError.userCanceled.rawValue))
     }
 
+    /// Ends the screen shown when AutoFill is turned on in Settings.
+    func finishConfiguration() {
+        context()?.completeExtensionConfigurationRequest()
+    }
+
     func tryBiometrics() async {
+        // Turning AutoFill on in Settings needs no unlocking.
+        guard mode != .configured else { return }
         guard let saved = SavedVault.load(), let id = info?.vaultId, BiometricKey.exists(vaultId: id) else { return }
         let key = await Task.detached { BiometricKey.read(vaultId: id, reason: "Unlock CleanPassword") }.value
         guard let key, let s = try? VaultSession.unlockWithKey(saved: saved, key: key) else { return }
@@ -222,7 +229,7 @@ struct ExtensionView: View {
                     } description: {
                         Text("Your passwords and passkeys will be offered when you sign in. Set up the vault in the CleanPassword app if you haven't yet.")
                     } actions: {
-                        Button("Done") { model.cancel() }.buttonStyle(.borderedProminent)
+                        Button("Done") { model.finishConfiguration() }.buttonStyle(.borderedProminent)
                     }
                 } else if model.info == nil {
                     ContentUnavailableView("No Vault Yet", systemImage: "key", description: Text("Open the CleanPassword app to set up your vault."))

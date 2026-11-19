@@ -96,6 +96,9 @@ async function lock(): Promise<void> {
     pendingSaves.clear();
     stepUsernames.clear();
     generatedIn.clear();
+    // Menus opened before don't work after a later unlock.
+    menus.clear();
+    saveMenus();
   });
 }
 
@@ -119,6 +122,8 @@ interface CoreRequest {
   body: Uint8Array;
 }
 
+const S3_TIMEOUT_MS = 30_000;
+
 /** The core's transport: fetch, without following redirects or cookies. */
 async function s3fetch(req: CoreRequest) {
   const resp = await fetch(req.url, {
@@ -128,6 +133,9 @@ async function s3fetch(req: CoreRequest) {
     redirect: "manual",
     credentials: "omit",
     cache: "no-store",
+    // A stalled connection mustn't hold the queue (and with it locking) for
+    // good: a sync is the only thing that waits on the network.
+    signal: AbortSignal.timeout(S3_TIMEOUT_MS),
   });
   const headers: [string, string][] = [];
   resp.headers.forEach((v, k) => headers.push([k, v]));
@@ -307,7 +315,7 @@ async function fillItem(frame: FrameRef, groupId: string, kind: FormKind, itemId
 
 /** Fills a generated password into a sign-up or change-password form, and
  *  saves it right away so it can't be lost if the page fails. */
-async function fillGenerated(frame: FrameRef, groupId: string, password: string): Promise<string | null> {
+async function fillGenerated(frame: FrameRef, groupId: string, kind: FormKind, password: string): Promise<string | null> {
   if (!session) return "locked";
   if (!(await stillThere(frame))) return "the page changed";
   const r = (await sendToFrame(frame, { type: "fill", groupId, values: { newPassword: password } })) as { ok?: boolean; username?: string } | null;
@@ -315,8 +323,13 @@ async function fillGenerated(frame: FrameRef, groupId: string, password: string)
   const domain = core.registrableDomain(hostOf(frame.url));
   const existing = tabLogin(frame.tabId, frame.url);
   const prev = existing ? (session.get(existing) as Item | undefined) : undefined;
+  // Only a password change replaces the password of the login used here
+  // (without a user name in the form, it's that login's). A sign-up form
+  // is another account, unless it names this one's user.
+  const changing = kind === "change-password" || kind === "reset-password";
+  const sameUser = !!r.username && !!prev && prev.username.toLowerCase() === r.username.toLowerCase();
   let id: string;
-  if (prev && (!r.username || prev.username.toLowerCase() === r.username.toLowerCase())) {
+  if (prev && (sameUser || (changing && !r.username))) {
     // A password change for the login used here: update it (the old
     // password goes into its history).
     session.update(prev.id, { ...prev, password } as ItemData);
@@ -347,6 +360,20 @@ interface PendingSave {
   at: number;
 }
 const pendingSaves = new Map<number, PendingSave>();
+/** How long a save is offered after the sign-in. */
+const PROMPT_TTL_MS = 2 * 60_000;
+
+/** The save waiting in a tab, if it's recent enough. */
+function pendingSave(tabId: number | undefined): PendingSave | undefined {
+  if (tabId === undefined) return undefined;
+  const p = pendingSaves.get(tabId);
+  if (p && Date.now() - p.at > PROMPT_TTL_MS) {
+    pendingSaves.delete(tabId);
+    void chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
+    return undefined;
+  }
+  return p;
+}
 /** User names entered at the first step of a sign-in, by tab. */
 const stepUsernames = new Map<number, { domain: string; username: string; at: number }>();
 
@@ -404,12 +431,8 @@ async function submitted(frame: FrameRef, s: Submission): Promise<void> {
 }
 
 async function showPrompt(tabId: number): Promise<void> {
-  const p = pendingSaves.get(tabId);
+  const p = pendingSave(tabId);
   if (!p) return;
-  if (Date.now() - p.at > 2 * 60_000) {
-    pendingSaves.delete(tabId);
-    return;
-  }
   const top = await chrome.webNavigation.getFrame({ tabId, frameId: 0 }).catch(() => null);
   // Only on the same site (a sign-in may redirect elsewhere): otherwise a
   // badge, and the popup offers it.
@@ -431,9 +454,10 @@ async function answerPrompt(p: PendingSave, tabId: number, answer: string): Prom
     return;
   }
   if (answer !== "save") return;
-  if (p.kind === "update" && p.itemId) {
-    const item = session.get(p.itemId) as Item;
-    session.update(p.itemId, { ...item, password: p.password, username: item.username || p.username } as ItemData);
+  const item = p.kind === "update" && p.itemId ? (session.get(p.itemId) as Item | undefined) : undefined;
+  if (item) {
+    // (Deleted meanwhile: saved as a new login instead.)
+    session.update(item.id, { ...item, password: p.password, username: item.username || p.username } as ItemData);
   } else {
     session.add({ kind: "login", name: core.registrableDomain(hostOf(p.url)), username: p.username, password: p.password, uris: [{ uri: originOf(p.url) }], totp: "", notes: "", folder: "", favorite: false, fields: [] });
   }
@@ -487,10 +511,17 @@ function finishPasskey(token: string, answer: PasskeyAnswer): void {
   if (r.windowId !== undefined) void chrome.windows.remove(r.windowId).catch(() => {});
 }
 
-/** The waiting conditional request of a frame, if any. */
+/** Whether two refs are the same document (as far as Chrome said). */
+function sameDocument(a: FrameRef, b: FrameRef): boolean {
+  return a.tabId === b.tabId && a.frameId === b.frameId && (!a.documentId || !b.documentId || a.documentId === b.documentId);
+}
+
+/** The waiting conditional request of a frame's document, if any (the
+ *  newest: a page asking again replaces what it asked before). */
 function conditionalFor(f: FrameRef): string | undefined {
-  for (const [t, r] of passkeyRequests) if (r.conditional && r.frame.tabId === f.tabId && r.frame.frameId === f.frameId) return t;
-  return undefined;
+  let found: string | undefined;
+  for (const [t, r] of passkeyRequests) if (r.conditional && sameDocument(r.frame, f)) found = t;
+  return found;
 }
 
 function idsOf(list: unknown): string[] {
@@ -528,15 +559,24 @@ async function webauthn(frame: FrameRef, msg: Msg): Promise<PasskeyAnswer> {
   if (!conditional) {
     for (const r of passkeyRequests.values()) if (r.frame.tabId === frame.tabId && !r.conditional) return NOT_ALLOWED;
   }
+  // A page asking in its sign-in field again: the request before is over.
+  if (conditional) {
+    for (const [t, r] of passkeyRequests) if (r.conditional && sameDocument(r.frame, frame)) finishPasskey(t, NOT_ALLOWED);
+  }
   return new Promise<PasskeyAnswer>((resolve) => {
     const t = token();
     const req: PasskeyRequest = { frame, pageId: Number(msg.id), kind, options: o, rpId, conditional, resolve };
     passkeyRequests.set(t, req);
     if (conditional) return; // answered from the inline menu
-    void chrome.windows.create({ url: chrome.runtime.getURL("passkey.html#" + t), type: "popup", width: 420, height: 560, focused: true }).then((w) => {
-      if (passkeyRequests.has(t)) req.windowId = w?.id;
-      else if (w?.id !== undefined) void chrome.windows.remove(w.id).catch(() => {});
-    });
+    void chrome.windows
+      .create({ url: chrome.runtime.getURL("passkey.html#" + t), type: "popup", width: 420, height: 560, focused: true })
+      .then((w) => {
+        if (passkeyRequests.has(t)) req.windowId = w?.id;
+        else if (w?.id !== undefined) void chrome.windows.remove(w.id).catch(() => {});
+      })
+      // No window, no way to answer: Chrome's own passkeys instead (and the
+      // tab isn't left blocked by a request no one can see).
+      .catch(() => finishPasskey(t, { fallback: true }));
   });
 }
 
@@ -673,7 +713,7 @@ async function fromPage(msg: Msg, sender: chrome.runtime.MessageSender): Promise
     case "prompt-pending": {
       // The top frame of a page that just loaded asks if a save is waiting.
       if (frame.frameId !== 0) return null;
-      const p = pendingSaves.get(frame.tabId);
+      const p = pendingSave(frame.tabId);
       if (p && core.registrableDomain(hostOf(p.url)) === core.registrableDomain(hostOf(frame.url))) return { token: p.token };
       return null;
     }
@@ -688,10 +728,13 @@ async function fromPage(msg: Msg, sender: chrome.runtime.MessageSender): Promise
         await openPopup();
         return null;
       }
+      // A form from another site, embedded in this page: the menu asks first
+      // (docs/autofill.md); a shortcut can't, so it doesn't fill there.
+      if (await embeddingPage(frame)) return null;
       const groupId = String(msg.groupId);
       if (msg.which === "generate") {
         const pw = core.generateForSite(hostOf(frame.url), (msg.passwordRules as string) || undefined);
-        await fillGenerated(frame, groupId, pw);
+        await fillGenerated(frame, groupId, msg.kind as FormKind, pw);
         return null;
       }
       const matches = session.matches(frame.url) as Match[];
@@ -704,8 +747,16 @@ async function fromPage(msg: Msg, sender: chrome.runtime.MessageSender): Promise
   return null;
 }
 
-/** The tab whose page a popup action is for. */
-async function activeTab(): Promise<chrome.tabs.Tab | undefined> {
+/** The tab whose page a popup action is for. The popup opened as a window
+ *  of its own (when Chrome can't open it under its button) is itself the
+ *  last focused window: then it's the browser window's tab. */
+async function activeTab(sender: chrome.runtime.MessageSender): Promise<chrome.tabs.Tab | undefined> {
+  if (sender.tab && new URL(sender.url ?? EXT_ORIGIN).searchParams.has("window")) {
+    const w = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
+    if (w?.id === undefined) return undefined;
+    const [tab] = await chrome.tabs.query({ active: true, windowId: w.id });
+    return tab;
+  }
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   return tab;
 }
@@ -831,23 +882,28 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
 
     // -- The page in the current tab (from the popup)
     case "tab-matches": {
-      const tab = await activeTab();
+      const tab = await activeTab(sender);
       const url = tab?.url ?? "";
-      return { host: hostOf(url), matches: /^https?:/.test(url) ? unique(s, s.matches(url) as Match[], tab?.id ? tabLogin(tab.id, url) : null) : [], pending: tab?.id ? pendingSaves.get(tab.id) ?? null : null };
+      return { host: hostOf(url), matches: /^https?:/.test(url) ? unique(s, s.matches(url) as Match[], tab?.id ? tabLogin(tab.id, url) : null) : [], pending: pendingSave(tab?.id) ?? null };
     }
     case "tab-fill": {
       // From the popup (a user gesture): fill the page's focused (or first)
       // sign-in form in the top frame.
-      const tab = await activeTab();
-      if (!tab?.id || !tab.url) return { error: "no page" };
-      const frame: FrameRef = { tabId: tab.id, frameId: 0, url: tab.url, origin: originOf(tab.url) };
-      const target = (await chrome.tabs.sendMessage(tab.id, { type: "fill-target" }, { frameId: 0 }).catch(() => null)) as { groupId: string; kind: FormKind } | null;
+      const tab = await activeTab(sender);
+      if (!tab?.id) return { error: "no page" };
+      // One document: the fill goes to the page that said where to fill, not
+      // to one the tab has navigated to since.
+      const top = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 }).catch(() => null);
+      if (!top?.url) return { error: "no page" };
+      const documentId = (top as { documentId?: string }).documentId;
+      const frame: FrameRef = { tabId: tab.id, frameId: 0, documentId, url: top.url, origin: originOf(top.url) };
+      const target = (await chrome.tabs.sendMessage(tab.id, { type: "fill-target" }, documentId ? { documentId } : { frameId: 0 }).catch(() => null)) as { groupId: string; kind: FormKind } | null;
       if (!target) return { error: "There's no sign-in form on this page." };
       return { error: await fillItem(frame, target.groupId, target.kind, String(msg.id), !!msg.anySite) };
     }
     case "tab-answer-prompt": {
-      const tab = await activeTab();
-      const p = tab?.id ? pendingSaves.get(tab.id) : undefined;
+      const tab = await activeTab(sender);
+      const p = pendingSave(tab?.id);
       if (p && tab?.id) await answerPrompt(p, tab.id, String(msg.answer));
       return null;
     }
@@ -880,6 +936,10 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
       const t = conditionalFor(m.frame);
       const req = t ? passkeyRequests.get(t) : undefined;
       if (!req || !t) return { error: "The page isn't asking for a passkey any more." };
+      if (!(await stillThere(req.frame))) {
+        finishPasskey(t, NOT_ALLOWED);
+        return { error: "The page changed." };
+      }
       finishPasskey(t, { result: await passkeyAssertion(req, String(msg.itemId), String(msg.credentialId)) });
       touch();
       return { error: null };
@@ -893,7 +953,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "menu-generate": {
       const m = menus.get(String(msg.token));
       if (!m || sender.tab?.id !== m.frame.tabId || !m.suggestion) return { error: "expired" };
-      return { error: await fillGenerated(m.frame, m.groupId, m.suggestion) };
+      return { error: await fillGenerated(m.frame, m.groupId, m.kind, m.suggestion) };
     }
     case "menu-off": {
       const m = menus.get(String(msg.token));
@@ -906,8 +966,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
 
     // -- The save prompt (an extension iframe in a page)
     case "prompt-state": {
-      const tabId = sender.tab?.id;
-      const p = tabId ? pendingSaves.get(tabId) : undefined;
+      const p = pendingSave(sender.tab?.id);
       if (!p || p.token !== msg.token) return null;
       const item = p.itemId ? (s.get(p.itemId) as Item | undefined) : undefined;
       const state: PromptState = { kind: p.kind, host: hostOf(p.url), username: p.username, name: item?.name ?? core.registrableDomain(hostOf(p.url)) };
@@ -915,7 +974,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     }
     case "prompt-answer": {
       const tabId = sender.tab?.id;
-      const p = tabId ? pendingSaves.get(tabId) : undefined;
+      const p = pendingSave(tabId);
       if (!p || !tabId || p.token !== msg.token) return null;
       await answerPrompt(p, tabId, String(msg.answer));
       return null;
@@ -973,6 +1032,15 @@ chrome.idle.onStateChanged.addListener(async (state) => {
 
 chrome.webNavigation.onCompleted.addListener((d) => {
   if (d.frameId === 0) void showPrompt(d.tabId);
+});
+
+// A frame showing a new document: what the old one asked for is over (its
+// page is gone, and a request kept would answer the next page's instead).
+chrome.webNavigation.onCommitted.addListener((d) => {
+  const now = { tabId: d.tabId, frameId: d.frameId, documentId: (d as { documentId?: string }).documentId, url: d.url, origin: "" };
+  for (const [t, r] of passkeyRequests) {
+    if (r.frame.tabId === d.tabId && r.frame.frameId === d.frameId && !(now.documentId && r.frame.documentId === now.documentId)) finishPasskey(t, NOT_ALLOWED);
+  }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {

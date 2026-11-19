@@ -18,6 +18,7 @@ use cleanpassword_core::import::{self, ImportedItem};
 use cleanpassword_core::s3::{HttpRequest, HttpResponse, Transport};
 use cleanpassword_core::sync::{self, SyncReport};
 use cleanpassword_core::vault::{self, VaultHeader};
+use cleanpassword_core::passkey::PasskeyTarget;
 use cleanpassword_core::{generator, passkey, rules, totp, AwsCredentials, Error, ItemData, S3Config, Vault};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -282,7 +283,8 @@ impl Session {
     }
 
     /// Creates a passkey (`request`: `{rp_id, rp_name, user_handle,
-    /// user_name, user_display_name}`), on `item_id` if given:
+    /// user_name, user_display_name}`), on `item_id` (the login the user
+    /// chose), or on a new login without one:
     /// `{item_id, credential_id, attestation_object, authenticator_data,
     /// public_key}`.
     #[wasm_bindgen(js_name = createPasskey)]
@@ -306,7 +308,8 @@ impl Session {
             user_name: r.user_name,
             user_display_name: r.user_display_name,
         };
-        let reg = self.with_mut(|v| v.create_passkey(&req, item_id.as_deref()))?.map_err(err)?;
+        let target = item_id.as_deref().filter(|s| !s.is_empty()).map_or(PasskeyTarget::New, PasskeyTarget::Item);
+        let reg = self.with_mut(|v| v.create_passkey_on(&req, target))?.map_err(err)?;
         to_js(&serde_json::json!({
             "item_id": reg.item_id,
             "credential_id": passkey::b64url(&reg.credential_id),

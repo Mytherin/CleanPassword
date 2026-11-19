@@ -18,7 +18,7 @@ use cleanpassword_core::generator::{self, Recipe};
 use cleanpassword_core::import;
 use cleanpassword_core::item::{Field, ItemData, ItemKind, ItemUri, UriMatch};
 use cleanpassword_core::matching::Quality;
-use cleanpassword_core::passkey::{self, NewPasskey};
+use cleanpassword_core::passkey::{self, NewPasskey, PasskeyTarget};
 use cleanpassword_core::s3::{HttpRequest, HttpResponse, Transport};
 use cleanpassword_core::sync::{self, SyncReport};
 use cleanpassword_core::vault::{self, VaultHeader};
@@ -585,11 +585,11 @@ impl VaultSession {
         self.v().passkey_excluded(&rp_id, &excluded)
     }
 
-    /// Creates a passkey and saves it on a login (`item_id`, or the
-    /// matching one, or a new one).
+    /// Creates a passkey and saves it on a login: `item_id`, the one the
+    /// user chose, or `None` for a new login ("A New Login").
     pub fn create_passkey(&self, rp_id: String, rp_name: String, user_handle: Vec<u8>, user_name: String, user_display_name: String, item_id: Option<String>) -> R<PasskeyRegistration> {
         let req = NewPasskey { rp_id, rp_name, user_handle, user_name, user_display_name };
-        let r = self.v().create_passkey(&req, item_id.as_deref())?;
+        let r = self.v().create_passkey_on(&req, item_id.as_deref().map_or(PasskeyTarget::New, PasskeyTarget::Item))?;
         Ok(PasskeyRegistration { item_id: r.item_id, credential_id: r.credential_id, attestation_object: r.attestation_object })
     }
 
@@ -731,6 +731,14 @@ mod tests {
         assert_eq!(sig.user_handle, b"user-1");
         s.delete_passkey(r.item_id.clone(), item.passkeys[0].id.clone()).unwrap();
         assert!(s.passkeys_for("example.com".into(), vec![]).is_empty());
+
+        // No item ("A New Login"): a new login, not the site's login that
+        // has no user name (which would get this one's).
+        let blank = s.add(ItemFields { username: String::new(), ..login("Example", "https://example.com") }).unwrap();
+        let r2 = s.create_passkey("example.com".into(), "Example".into(), b"user-2".to_vec(), "two@example.com".into(), "Two".into(), None).unwrap();
+        assert_ne!(r2.item_id, blank);
+        assert_eq!(s.get(blank.clone()).unwrap().fields.username, "");
+        assert!(s.get(blank).unwrap().passkeys.is_empty());
     }
 
     #[test]

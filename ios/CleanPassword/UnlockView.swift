@@ -45,7 +45,7 @@ struct UnlockView: View {
         }
         .padding(24)
         .task {
-            if store.biometricsOn, await store.unlockWithBiometrics() { return }
+            if store.offerBiometrics, store.biometricsOn, await store.unlockWithBiometrics() { return }
             focused = true
         }
         .confirmationDialog("Remove the vault from this iPhone?", isPresented: $confirmForget, titleVisibility: .visible) {

@@ -29,7 +29,7 @@ struct PasswordsView: View {
                 Menu {
                     Button { showSettings = true } label: { Label("Settings", systemImage: "gear") }
                     Button { showGenerator = true } label: { Label("Password Generator", systemImage: "dice") }
-                    Button { store.lock() } label: { Label("Lock Now", systemImage: "lock") }
+                    Button { store.lock(manually: true) } label: { Label("Lock Now", systemImage: "lock") }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }

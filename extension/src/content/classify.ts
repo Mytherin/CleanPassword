@@ -144,7 +144,15 @@ export function isViewable(el: HTMLElement): boolean {
   }
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
-  if (cx < 0 || cy < 0 || cx > win.innerWidth || cy > win.innerHeight) return true; // below the fold: fine
+  if (cx > win.innerWidth) {
+    // Off to the right: only where the page scrolls to (a field pushed out
+    // past `overflow-x: hidden` is a trap no one can see).
+    const doc = el.ownerDocument;
+    const clipped = [doc.documentElement, doc.body].some((e) => e && /hidden|clip/.test(win.getComputedStyle(e).overflowX));
+    if (clipped || rect.left + win.scrollX >= (doc.scrollingElement ?? doc.documentElement).scrollWidth) return false;
+    return true;
+  }
+  if (cx < 0 || cy < 0 || cy > win.innerHeight) return true; // below the fold: fine
   const root = el.getRootNode() as Document | ShadowRoot;
   const hit = root.elementFromPoint?.(cx, cy);
   if (!hit || hit === el || deepContains(el, hit) || deepContains(hit, el)) return true;

@@ -61,7 +61,8 @@ pub fn code(totp: &str, unix_time: u64) -> Result<Code> {
             })
             .collect()
     } else {
-        format!("{:0width$}", bin % 10u32.pow(spec.digits), width = spec.digits as usize)
+        // 10^10 doesn't fit a u32 (10-digit codes are allowed).
+        format!("{:0width$}", u64::from(bin) % 10u64.pow(spec.digits), width = spec.digits as usize)
     };
     Ok(Code { code, period: spec.period, remaining: spec.period - unix_time % spec.period })
 }
@@ -160,6 +161,15 @@ mod tests {
         assert!(is_valid("JBSWY3DPEHPK3PXP"));
         assert!(!is_valid("not base32!"));
         assert!(!is_valid("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP"));
+    }
+
+    #[test]
+    fn nine_and_ten_digit_codes() {
+        let uri = |d: u32| format!("otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits={d}");
+        // RFC 6238's SHA-1 vector at t=59 truncates to 1094287082.
+        assert_eq!(code(&uri(10), 59).unwrap().code, "1094287082");
+        assert_eq!(code(&uri(9), 59).unwrap().code, "094287082");
+        assert!(code(&uri(11), 59).is_err());
     }
 
     #[test]

@@ -12,6 +12,8 @@ const token = location.hash.slice(1);
 const root = document.getElementById("root")!;
 let state: MenuState | null = null;
 let rows: HTMLButtonElement[] = [];
+/** What each row does, given the (trusted) event that chose it. */
+const actions = new WeakMap<HTMLButtonElement, (e: Event) => void>();
 let confirming: string | null = null;
 
 // With more logins than fit, the list scrolls and a field above it narrows it
@@ -90,6 +92,7 @@ async function act(e: Event, f: () => Promise<{ error: string | null } | null | 
 function row(icon: Node, title: string, sub: string, onAct: (e: Event) => void, cls = ""): HTMLButtonElement {
   const b = h("button", { class: `row ${cls}`, role: "option", onclick: onAct }, icon, h("span", { class: "text" }, h("div", { class: "title" }, title), h("div", { class: "sub" }, sub)));
   rows.push(b);
+  actions.set(b, onAct);
   return b;
 }
 
@@ -115,6 +118,8 @@ function matchRow(m: Match): HTMLButtonElement {
 }
 
 function render(): void {
+  // Taking the filter out of the page (to rebuild it) takes its focus away.
+  const filtering = document.activeElement === filter;
   rows = [];
   root.replaceChildren();
   const s = state;
@@ -139,6 +144,7 @@ function render(): void {
       matches = [...matches].sort((a, b) => Number(b.id === s.preferredId) - Number(a.id === s.preferredId));
       if (matches.length >= FILTER_FROM) {
         root.append(filter);
+        if (filtering) filter.focus();
         const q = filter.value.trim().toLowerCase();
         if (q) matches = matches.filter((m) => m.name.toLowerCase().includes(q) || (m.username ?? "").toLowerCase().includes(q));
       }
@@ -166,7 +172,11 @@ document.addEventListener("keydown", (e) => {
   const filtering = filter.isConnected;
   if (document.activeElement === filter) {
     if (e.key === "ArrowDown") firstListed()?.focus();
-    else if (e.key === "Enter") firstListed()?.click();
+    else if (e.key === "Enter") {
+      // With the key itself: a script's click() isn't trusted, and is ignored.
+      const first = firstListed();
+      if (first) actions.get(first)?.(e);
+    }
     else if (e.key === "Escape") {
       if (filter.value) {
         filter.value = "";
@@ -192,7 +202,10 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault();
 });
 
+// From the page's overlay. The page itself can post here too (it shares the
+// overlay's window), but it doesn't know the token.
 window.addEventListener("message", (e) => {
+  if (e.data?.token !== token) return;
   if (e.data?.type === "focus-first") rows[0]?.focus();
   // As tall as there's room for in the page's window, the list scrolling.
   if (e.data?.type === "max-height" && typeof e.data.height === "number") root.style.maxHeight = `${e.data.height}px`;

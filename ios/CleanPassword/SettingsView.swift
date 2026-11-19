@@ -33,6 +33,11 @@ struct SettingsView: View {
                 if BiometricKey.isAvailable {
                     Toggle("Unlock with \(BiometricKey.biometryName)", isOn: $biometrics)
                         .onChange(of: biometrics) { _, on in
+                            // Also called when the screen sets the toggle to
+                            // what's already so: then there's nothing to do
+                            // (storing the key again would re-arm it without
+                            // Face ID, even after the enrolled faces changed).
+                            guard on != store.biometricsOn else { return }
                             Task {
                                 do { try await store.setBiometrics(on) } catch { self.error = message(error); biometrics = store.biometricsOn }
                             }

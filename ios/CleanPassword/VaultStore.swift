@@ -82,9 +82,17 @@ final class VaultStore: ObservableObject {
         sync()
     }
 
-    func lock() {
+    /// Whether the unlock screen starts Face ID by itself. Not right after
+    /// Lock Now: the user is looking at the phone, so it would unlock again.
+    private(set) var offerBiometrics = true
+
+    /// Locks, and forgets what was shown (passwords included).
+    func lock(manually: Bool = false) {
+        offerBiometrics = !manually
         Core.shared.lock()
         items = []
+        trash = []
+        findings = []
         refreshPhase()
     }
 
@@ -95,6 +103,8 @@ final class VaultStore: ObservableObject {
         SavedVault.remove()
         SuggestionStore.clear()
         items = []
+        trash = []
+        findings = []
         refreshPhase()
     }
 

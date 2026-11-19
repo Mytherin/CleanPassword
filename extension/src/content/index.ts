@@ -39,11 +39,34 @@ function groupOf(el: Element | null): Group | undefined {
   return groups.find((g) => g.roles.has(el));
 }
 
+/** An element's shadow root, closed ones too (through chrome.dom). */
+function shadowRootOf(el: Element): ShadowRoot | null {
+  if (el.shadowRoot) return el.shadowRoot;
+  try {
+    return chrome.dom?.openOrClosedShadowRoot?.(el as HTMLElement) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The focused element inside `el`'s shadow roots, or `el`. */
+function focusedWithin(el: Element | null): Element | null {
+  let a = el;
+  for (let r = a && shadowRootOf(a); r?.activeElement; r = shadowRootOf(a!)) a = r.activeElement;
+  return a;
+}
+
 /** The element with the focus, inside shadow roots too. */
 function deepActive(): Element | null {
-  let a: Element | null = document.activeElement;
-  while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement;
-  return a;
+  return focusedWithin(document.activeElement);
+}
+
+/** The element an event is for. Events from inside a closed shadow root
+ *  reach the document as if from its host: then it's the focused element
+ *  inside that host (where a click or a key goes). */
+function eventTarget(e: Event): Element | null {
+  const t = e.composedPath()[0] as Element;
+  return t instanceof HTMLInputElement ? t : focusedWithin(t);
 }
 
 // ---- The inline menu ---------------------------------------------------------------
@@ -90,7 +113,7 @@ document.addEventListener(
   "focusin",
   (e) => {
     if (!e.isTrusted) return;
-    const target = e.composedPath()[0] as Element;
+    const target = eventTarget(e);
     if (!(target instanceof HTMLInputElement)) return;
     if (!groupOf(target)) rescan();
     void openMenu(target);
@@ -102,9 +125,9 @@ document.addEventListener(
   "click",
   (e) => {
     if (!e.isTrusted) return;
-    const target = e.composedPath()[0] as Element;
+    const target = eventTarget(e);
     if (target instanceof HTMLInputElement && groupOf(target) && !menu.isOpen) void openMenu(target);
-    maybeSubmitClick(target);
+    if (target) maybeSubmitClick(target);
   },
   true,
 );
@@ -125,7 +148,7 @@ document.addEventListener(
   "keydown",
   (e) => {
     if (!e.isTrusted) return;
-    const target = e.composedPath()[0] as Element;
+    const target = eventTarget(e);
     if (menu.isOpen && target === menuField) {
       if (e.key === "Escape") menu.close();
       else if (e.key === "ArrowDown") {
@@ -145,12 +168,24 @@ document.addEventListener(
   "input",
   (e) => {
     // Typing: the menu steps aside (as Safari's does).
-    if (e.isTrusted && menu.isOpen && e.composedPath()[0] === menuField) menu.close();
+    if (e.isTrusted && menu.isOpen && eventTarget(e) === menuField) menu.close();
   },
   true,
 );
 
 window.addEventListener("resize", () => menu.close());
+
+// ---- The save prompt -------------------------------------------------------------------
+
+let promptToken: string | null = null;
+
+/** Shows the save prompt, unless it's already showing this one (showing it
+ *  again would start its click delay over). */
+function showPrompt(token: string): void {
+  if (prompt.isOpen && promptToken === token) return;
+  promptToken = token;
+  prompt.show(token, null);
+}
 
 // ---- Noticing sign-ins ---------------------------------------------------------------
 
@@ -235,7 +270,7 @@ chrome.runtime.onMessage.addListener((msg: { type: string; [k: string]: unknown 
       return false;
     }
     case "show-prompt":
-      if (window === window.top) prompt.show(String(msg.token), null);
+      if (window === window.top) showPrompt(String(msg.token));
       return false;
   }
   return false;
@@ -253,5 +288,5 @@ rescan();
 
 if (window === window.top) {
   // A save waiting from the sign-in that led here.
-  void send<{ token: string }>({ type: "prompt-pending" }).then((r) => r && prompt.show(r.token, null));
+  void send<{ token: string }>({ type: "prompt-pending" }).then((r) => r && showPrompt(r.token));
 }

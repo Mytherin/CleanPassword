@@ -47,12 +47,37 @@ export class Overlay {
   private foreignMutations = 0;
   private reshown: number[] = [];
   private anchor: HTMLElement | null = null;
+  private token = "";
+  /** Top-layer elements already open when ours was last shown: ours is
+   *  above them. Only ones opened since can cover it. */
+  private beneath = new Set<Element>();
   private timer: ReturnType<typeof setInterval> | undefined;
   onClose: (() => void) | null = null;
   disabled = false;
 
   constructor(private page: "menu.html" | "prompt.html", private placement: "below" | "corner") {
     window.addEventListener("message", (e) => this.onMessage(e));
+    // An element already beneath ours, shown again, goes on top of it.
+    document.addEventListener(
+      "toggle",
+      (e) => {
+        if ((e as ToggleEvent).newState === "open" && e.target !== this.host) this.beneath.delete(e.target as Element);
+      },
+      true,
+    );
+  }
+
+  private topLayer(): Element[] {
+    return Array.from(document.querySelectorAll(":popover-open, :modal")).filter((e) => e !== this.host);
+  }
+
+  /** Shows ours on top of everything in the top layer. */
+  private raise(host: HTMLElement): void {
+    try {
+      if (host.matches(":popover-open")) host.hidePopover();
+      host.showPopover();
+    } catch {}
+    this.beneath = new Set(this.topLayer());
   }
 
   get isOpen(): boolean {
@@ -82,14 +107,17 @@ export class Overlay {
     frame.setAttribute("allow", "");
     frame.title = "CleanPassword";
     shadow.append(style, frame);
-    document.documentElement.append(host);
+    // A field in a modal dialog: everything outside that dialog is inert,
+    // so ours goes inside it (in the top layer all the same).
+    let modal: Element | null = null;
+    for (let e: Element | null = anchor; e && !modal; e = parentOf(e)) if (e.localName === "dialog" && e.matches(":modal")) modal = e;
+    (modal ?? document.documentElement).append(host);
     this.host = host;
     this.frame = frame;
+    this.token = token;
     this.size(this.placement === "below" ? 52 : 140);
     this.position();
-    try {
-      host.showPopover();
-    } catch {}
+    this.raise(host);
     // The page meddling with our element: put it back, or give up.
     this.foreignMutations = 0;
     this.observer = new MutationObserver((records) => {
@@ -123,7 +151,7 @@ export class Overlay {
   /** Keyboard users: arrow down from the field into the menu. */
   focusInside(): void {
     this.frame?.focus();
-    this.frame?.contentWindow?.postMessage({ type: "focus-first" }, EXT_ORIGIN);
+    this.frame?.contentWindow?.postMessage({ type: "focus-first", token: this.token }, EXT_ORIGIN);
   }
 
   private width = 320;
@@ -149,7 +177,7 @@ export class Overlay {
 
   /** Tells the frame how tall it may be (it scrolls its list to fit). */
   private sendRoom(): void {
-    this.frame?.contentWindow?.postMessage({ type: "max-height", height: this.room }, EXT_ORIGIN);
+    this.frame?.contentWindow?.postMessage({ type: "max-height", height: this.room, token: this.token }, EXT_ORIGIN);
   }
 
   private applyStyle(): void {
@@ -205,10 +233,10 @@ export class Overlay {
       if (r.bottom < 0 || r.top > window.innerHeight) return this.close();
     }
     this.position();
-    // Another element in the top layer could cover ours: re-show ours on
-    // top, a few times; if it keeps happening, give up on this page.
-    const others = Array.from(document.querySelectorAll(":popover-open, :modal")).filter((e) => e !== host);
-    if (others.length) {
+    // An element put in the top layer after ours could cover it: re-show ours
+    // on top, a few times; if it keeps happening, give up on this page.
+    // (Ones open from before, a page's dialog or popover, stay beneath it.)
+    if (!host.matches(":popover-open") || this.topLayer().some((e) => !this.beneath.has(e))) {
       const now = Date.now();
       this.reshown = this.reshown.filter((t) => now - t < 5000);
       if (this.reshown.length >= 5) {
@@ -217,10 +245,7 @@ export class Overlay {
         return;
       }
       this.reshown.push(now);
-      try {
-        host.hidePopover();
-        host.showPopover();
-      } catch {}
+      this.raise(host);
     }
     // Ours must be what's at its own corners and centre.
     const r = host.getBoundingClientRect();

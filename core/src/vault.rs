@@ -243,6 +243,15 @@ fn device_aad(vault_id: &str) -> Vec<u8> {
     format!("cleanpassword/device/v1/{vault_id}").into_bytes()
 }
 
+/// An item without a name is named after its site's domain, or its user
+/// name.
+fn with_default_name(mut data: ItemData) -> ItemData {
+    if data.name.trim().is_empty() {
+        data.name = data.uris.first().and_then(|u| matching::parse_page(&u.uri)).map(|p| p.domain).unwrap_or_else(|| data.username.clone());
+    }
+    data
+}
+
 pub fn check_master_password(password: &str) -> Result<()> {
     if password.chars().count() < MIN_MASTER_PASSWORD {
         return Err(Error::invalid(format!("the master password needs at least {MIN_MASTER_PASSWORD} characters")));
@@ -370,7 +379,8 @@ impl Vault {
     /// Folder names in use, sorted.
     pub fn folders(&self) -> Vec<String> {
         let mut f: Vec<String> = self.items().iter().map(|i| i.folder.clone()).filter(|f| !f.is_empty()).collect();
-        f.sort_by_key(|s| s.to_lowercase());
+        // Ties broken by the exact name, so equal names are adjacent.
+        f.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
         f.dedup();
         f
     }
@@ -380,11 +390,7 @@ impl Vault {
         if data.name.trim().is_empty() && data.uris.is_empty() && data.username.is_empty() {
             return Err(Error::invalid("give the item a name"));
         }
-        let mut data = data;
-        if data.name.trim().is_empty() {
-            data.name = data.uris.first().and_then(|u| matching::parse_page(&u.uri)).map(|p| p.domain).unwrap_or_else(|| data.username.clone());
-        }
-        let item = Item::new(data, Utc::now());
+        let item = Item::new(with_default_name(data), Utc::now());
         let id = item.id.clone();
         self.s.items.insert(id.clone(), item);
         Ok(id)
@@ -495,7 +501,12 @@ impl Vault {
     /// Adds imported items (with their password history), skipping ones
     /// already here.
     pub fn import(&mut self, items: Vec<crate::import::ImportedItem>) -> ImportSummary {
-        let fingerprint = |d: &ItemData| (d.name.trim().to_lowercase(), d.username.clone(), d.password.clone(), d.uris.first().map(|u| u.uri.clone()), d.notes.clone());
+        // As the item is stored: an item imported without a name was named
+        // after its site, and must still be recognised the next time.
+        let fingerprint = |d: &ItemData| {
+            let name = if d.name.trim().is_empty() { with_default_name(d.clone()).name } else { d.name.clone() };
+            (name.trim().to_lowercase(), d.username.clone(), d.password.clone(), d.uris.first().map(|u| u.uri.clone()), d.notes.clone())
+        };
         let mut seen: std::collections::HashMap<_, String> = self.items().iter().map(|i| (fingerprint(&i.data()), i.id.clone())).collect();
         let mut summary = ImportSummary::default();
         for imported in items {
@@ -667,6 +678,20 @@ pub(crate) mod tests {
         let items: Vec<_> = [login("A", "https://a.com", "x", "1"), login("A", "https://a.com", "x", "1"), login("B", "https://b.com", "x", "2")].into_iter().map(wrap).collect();
         assert_eq!(v.import(items.clone()), ImportSummary { added: 2, skipped: 1, passkeys: 0 });
         assert_eq!(v.import(items), ImportSummary { added: 0, skipped: 3, passkeys: 0 });
+        // Nameless ones (Firefox's CSV has no names) are named after the
+        // site, and still recognised the next time.
+        let nameless = vec![wrap(login("", "https://www.c.com/login", "x", "3")), wrap(login(" ", "", "solo", "4"))];
+        assert_eq!(v.import(nameless.clone()), ImportSummary { added: 2, skipped: 0, passkeys: 0 });
+        assert_eq!(v.import(nameless), ImportSummary { added: 0, skipped: 2, passkeys: 0 });
+    }
+
+    #[test]
+    fn folders_listed_once() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        for (name, folder) in [("A", "Work"), ("B", "work"), ("C", "Work"), ("D", "Home"), ("E", "")] {
+            v.add(ItemData { folder: folder.into(), ..login(name, "https://a.com", "x", "1") }).unwrap();
+        }
+        assert_eq!(v.folders(), ["Home", "Work", "work"]);
     }
 
     #[test]
