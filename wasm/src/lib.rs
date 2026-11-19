@@ -18,7 +18,7 @@ use cleanpassword_core::import::{self, ImportedItem};
 use cleanpassword_core::s3::{HttpRequest, HttpResponse, Transport};
 use cleanpassword_core::sync::{self, SyncReport};
 use cleanpassword_core::vault::{self, VaultHeader};
-use cleanpassword_core::{generator, rules, totp, AwsCredentials, Error, ItemData, S3Config, Vault};
+use cleanpassword_core::{generator, passkey, rules, totp, AwsCredentials, Error, ItemData, S3Config, Vault};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -263,6 +263,81 @@ impl Session {
         self.with(|v| v.last_sync().map(|t| t.to_rfc3339()))
     }
 
+    // ---- Passkeys (byte strings cross as base64url) -------------------------
+
+    /// The passkeys for a relying party (limited to `allow`, credential ids,
+    /// if not empty): `[{item_id, item_name, credential_id, user_name,
+    /// user_display_name}]`.
+    #[wasm_bindgen(js_name = passkeysFor)]
+    pub fn passkeys_for(&self, rp_id: &str, allow: Vec<String>) -> JsResult<JsValue> {
+        let allow = decode_all(&allow)?;
+        self.with(|v| to_js(&v.passkeys_for(rp_id, &allow)))?.map_err(bad)
+    }
+
+    /// Whether one of the site's existing credentials (`exclude`) is here.
+    #[wasm_bindgen(js_name = passkeyExcluded)]
+    pub fn passkey_excluded(&self, rp_id: &str, exclude: Vec<String>) -> JsResult<bool> {
+        let exclude = decode_all(&exclude)?;
+        self.with(|v| v.passkey_excluded(rp_id, &exclude))
+    }
+
+    /// Creates a passkey (`request`: `{rp_id, rp_name, user_handle,
+    /// user_name, user_display_name}`), on `item_id` if given:
+    /// `{item_id, credential_id, attestation_object, authenticator_data,
+    /// public_key}`.
+    #[wasm_bindgen(js_name = createPasskey)]
+    pub fn create_passkey(&self, request: JsValue, item_id: Option<String>) -> JsResult<JsValue> {
+        #[derive(Deserialize)]
+        struct Req {
+            rp_id: String,
+            #[serde(default)]
+            rp_name: String,
+            user_handle: String,
+            #[serde(default)]
+            user_name: String,
+            #[serde(default)]
+            user_display_name: String,
+        }
+        let r: Req = from_js(request).map_err(bad)?;
+        let req = passkey::NewPasskey {
+            rp_id: r.rp_id,
+            rp_name: r.rp_name,
+            user_handle: passkey::unb64(&r.user_handle).map_err(err)?,
+            user_name: r.user_name,
+            user_display_name: r.user_display_name,
+        };
+        let reg = self.with_mut(|v| v.create_passkey(&req, item_id.as_deref()))?.map_err(err)?;
+        to_js(&serde_json::json!({
+            "item_id": reg.item_id,
+            "credential_id": passkey::b64url(&reg.credential_id),
+            "attestation_object": passkey::b64url(&reg.attestation_object),
+            "authenticator_data": passkey::b64url(&reg.authenticator_data),
+            "public_key": passkey::b64url(&reg.public_key),
+        }))
+        .map_err(bad)
+    }
+
+    /// Signs in with a passkey: `{credential_id, authenticator_data,
+    /// signature, user_handle}`.
+    #[wasm_bindgen(js_name = assertPasskey)]
+    pub fn assert_passkey(&self, item_id: &str, credential_id: &str, rp_id: &str, client_data_hash: &str) -> JsResult<JsValue> {
+        let id = passkey::unb64(credential_id).map_err(err)?;
+        let hash = passkey::unb64(client_data_hash).map_err(err)?;
+        let a = self.with_mut(|v| v.assert_passkey(item_id, &id, rp_id, &hash))?.map_err(err)?;
+        to_js(&serde_json::json!({
+            "credential_id": passkey::b64url(&a.credential_id),
+            "authenticator_data": passkey::b64url(&a.authenticator_data),
+            "signature": passkey::b64url(&a.signature),
+            "user_handle": passkey::b64url(&a.user_handle),
+        }))
+        .map_err(bad)
+    }
+
+    #[wasm_bindgen(js_name = deletePasskey)]
+    pub fn delete_passkey(&self, item_id: &str, credential_id: &str) -> JsResult<()> {
+        self.with_mut(|v| v.delete_passkey(item_id, credential_id))?.map_err(err)
+    }
+
     /// Syncs with S3; resolves to the report. Other calls fail while it
     /// runs.
     pub fn sync(&self, fetch: js_sys::Function) -> js_sys::Promise {
@@ -340,6 +415,22 @@ pub fn import_needs_password(text: &str) -> bool {
 #[wasm_bindgen(js_name = registrableDomain)]
 pub fn registrable_domain(host: &str) -> String {
     cleanpassword_core::matching::registrable_domain(host)
+}
+
+fn decode_all(ids: &[String]) -> JsResult<Vec<Vec<u8>>> {
+    ids.iter().map(|s| passkey::unb64(s).map_err(err)).collect()
+}
+
+/// The client data JSON a browser would make for a passkey request.
+#[wasm_bindgen(js_name = clientDataJson)]
+pub fn client_data_json(kind: &str, challenge: &str, origin: &str, cross_origin: bool) -> JsResult<String> {
+    Ok(passkey::client_data_json(kind, &passkey::unb64(challenge).map_err(err)?, origin, cross_origin))
+}
+
+/// Whether a page at `origin` may use passkeys for `rp_id`.
+#[wasm_bindgen(js_name = rpIdAllowed)]
+pub fn rp_id_allowed(rp_id: &str, origin: &str) -> bool {
+    passkey::rp_id_allowed(rp_id, origin)
 }
 
 fn now_secs() -> u64 {

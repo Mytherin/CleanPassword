@@ -10,6 +10,7 @@
 //
 //   npm test     (builds first)
 
+import { createHash, verify as verifySignature } from "node:crypto";
 import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
@@ -59,6 +60,28 @@ const pages = {
     <form action="/welcome" method="get"><input id="email" type="email" autocomplete="username" placeholder="Email">
     <input id="np" type="password" autocomplete="new-password" placeholder="New password">
     <input id="cp" type="password" autocomplete="new-password" placeholder="Confirm password"><button type="submit">Create account</button></form>`,
+  // A site using passkeys (on localhost: passkeys need https or localhost).
+  "/passkey": `<!doctype html><title>Passkeys</title><h1>Sign in</h1>
+    <form><input id="u" autocomplete="username webauthn" placeholder="Email"><input id="p" type="password"><button>Sign in</button></form>
+    <script>
+      const b64 = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+      const text = (b) => new TextDecoder().decode(b);
+      window.results = {};
+      window.register = async () => {
+        const challenge = crypto.getRandomValues(new Uint8Array(32));
+        const c = await navigator.credentials.create({ publicKey: { rp: { name: "Passkey Test" }, user: { id: new TextEncoder().encode("user-1"), name: "pat@example.com", displayName: "Pat" },
+          challenge, pubKeyCredParams: [{ type: "public-key", alg: -7 }], authenticatorSelection: { residentKey: "required", userVerification: "required" } } });
+        results.create = { id: c.id, rawId: b64(c.rawId), clientDataJSON: text(c.response.clientDataJSON), challenge: b64(challenge), publicKey: b64(c.response.getPublicKey()),
+          alg: c.response.getPublicKeyAlgorithm(), authData: b64(c.response.getAuthenticatorData()), isCredential: c instanceof PublicKeyCredential, json: JSON.stringify(c.toJSON()) };
+      };
+      window.login = async (mediation) => {
+        const challenge = crypto.getRandomValues(new Uint8Array(32));
+        const c = await navigator.credentials.get({ mediation, publicKey: { challenge, userVerification: "required" } });
+        results.get = { id: c.id, clientDataJSON: text(c.response.clientDataJSON), challenge: b64(challenge), authData: b64(c.response.authenticatorData),
+          signature: b64(c.response.signature), userHandle: text(c.response.userHandle) };
+        return results.get;
+      };
+    </script>`,
   "/faded": `<!doctype html><title>Faded</title><style>html{opacity:.5}</style>
     <form><input id="u" autocomplete="username"><input id="p" type="password"><button>Sign in</button></form>`,
 };
@@ -215,6 +238,66 @@ try {
   check("uploads one object per item", keys.filter((k) => k.includes("/items/")).length >= 3, keys.join(", "));
   check("S3 never sees names, user names or passwords", !/alice|carol|s3cret|typed-by-hand|Test site|127\.0\.0\.1/.test(all));
 
+  // Passkeys: a site creates one (confirmed in CleanPassword's window), then
+  // signs in with it, from the window and from the sign-in field's menu.
+  const LOCAL = WEB.replace("127.0.0.1", "localhost");
+  await tab.goto(`${LOCAL}/passkey`);
+  await sleep(300);
+  const registering = tab.evaluate(() => window.register().then(() => "done", (e) => `${e.name}: ${e.message}`));
+  const saveWin = await passkeyWindow();
+  check("asks in a window of its own to save a passkey", !!saveWin);
+  if (saveWin) {
+    await saveWin.waitForSelector(".btn.primary");
+    await sleep(500);
+    await saveWin.click(".btn.primary");
+  }
+  const registered = await registering;
+  check("the site gets the new passkey", registered === "done", registered);
+  const created = await tab.evaluate(() => window.results.create);
+  if (created) {
+    const client = JSON.parse(created.clientDataJSON);
+    check("with the right client data", client.type === "webauthn.create" && client.challenge === created.challenge && client.origin === LOCAL, created.clientDataJSON);
+    const authData = fromB64(created.authData);
+    check("authenticator data for localhost, with flags and the key", authData.subarray(0, 32).equals(createHash("sha256").update("localhost").digest()) && authData[32] === 0x5d && created.alg === -7);
+    check("as a real PublicKeyCredential", created.isCredential && created.id === created.rawId && JSON.parse(created.json).response.publicKeyAlgorithm === -7);
+    const items = await ask("items");
+    const saved = items.find((i) => (i.passkeys ?? []).length === 1);
+    check("saved on a new login for the site", !!saved && saved.username === "pat@example.com" && saved.passkeys[0].rp_id === "localhost", JSON.stringify(saved?.passkeys?.[0]?.rp_id));
+
+    // Signing in, from the window.
+    const signing = tab.evaluate(() => window.login().then(() => "done", (e) => `${e.name}: ${e.message}`));
+    const useWin = await passkeyWindow();
+    check("asks in a window to sign in with it", !!useWin);
+    if (useWin) {
+      await useWin.waitForSelector(".list .row");
+      await sleep(500);
+      await useWin.click(".list .row");
+    }
+    check("signs in", (await signing) === "done");
+    const got = await tab.evaluate(() => window.results.get);
+    check("with a signature the site's public key verifies", !!got && verifyAssertion(got, created.publicKey, LOCAL));
+    check("and the account's user handle", got?.userHandle === "user-1" && got?.id === created.id);
+
+    // Signing in from the sign-in field (conditional mediation).
+    await tab.goto(`${LOCAL}/passkey`);
+    await sleep(300);
+    await tab.evaluate(() => {
+      window.conditional = window.login("conditional");
+    });
+    await sleep(300);
+    await tab.click("#u");
+    const menu = await waitForFrame(tab, "menu.html");
+    if (menu) {
+      await menu.waitForSelector(".row.passkey", { timeout: 4000 }).catch(() => null);
+      await sleep(700);
+      const row = await menu.$(".row.passkey");
+      check("offers the passkey in the sign-in field's menu", !!row);
+      if (row) await row.click();
+      const viaMenu = await tab.evaluate(() => Promise.race([window.conditional, new Promise((r) => setTimeout(() => r(null), 4000))]));
+      check("and signs in with it from there", !!viaMenu && verifyAssertion(viaMenu, created.publicKey, LOCAL));
+    } else check("offers the passkey in the sign-in field's menu", false);
+  }
+
   // Locked: the menu offers unlocking.
   await ask("lock");
   await tab.goto(`${WEB}/login`);
@@ -240,6 +323,24 @@ try {
   web.close();
   s3.server.close();
   rmSync(ext, { recursive: true, force: true });
+}
+
+/** The passkey window, once it opens. */
+async function passkeyWindow() {
+  const t = await browser.waitForTarget((t) => t.url().includes("/passkey.html"), { timeout: 8000 }).catch(() => null);
+  return t ? await t.page() : null;
+}
+
+function fromB64(s) {
+  return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+}
+
+/** Checks a sign-in's signature as a site would. */
+function verifyAssertion(r, publicKey, origin) {
+  const client = JSON.parse(r.clientDataJSON);
+  if (client.type !== "webauthn.get" || client.challenge !== r.challenge || client.origin !== origin) return false;
+  const signed = Buffer.concat([fromB64(r.authData), createHash("sha256").update(r.clientDataJSON).digest()]);
+  return verifySignature("sha256", signed, { key: fromB64(publicKey), format: "der", type: "spki" }, fromB64(r.signature));
 }
 
 async function waitForFrame(page, name, timeout = 4000) {

@@ -86,6 +86,32 @@ pub struct ItemData {
     pub fields: Vec<Field>,
 }
 
+/// A passkey (a WebAuthn discoverable credential): a P-256 key pair a site
+/// knows the public half of. Stored as Bitwarden exports them, so they move
+/// both ways.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Passkey {
+    /// The credential id, base64url.
+    pub credential_id: String,
+    /// The site's relying party id (a domain, e.g. `github.com`).
+    pub rp_id: String,
+    #[serde(default)]
+    pub rp_name: String,
+    /// The site's id for the account, base64url.
+    pub user_handle: String,
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default)]
+    pub user_display_name: String,
+    /// The private key: PKCS#8 DER, base64url.
+    pub key: String,
+    /// The signature counter. Passkeys made here keep 0 (they're synced, as
+    /// Apple's and Google's are); imported ones that counted keep counting.
+    #[serde(default)]
+    pub counter: u32,
+    pub created: DateTime<Utc>,
+}
+
 /// How many old passwords an item remembers.
 pub const HISTORY_LIMIT: usize = 20;
 
@@ -114,6 +140,10 @@ pub struct Item {
     pub fields: Vec<Field>,
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
+    /// The item's passkeys (see [`crate::passkey`]). Made by sites, not
+    /// edited, so not in [`ItemData`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passkeys: Vec<Passkey>,
     pub created: DateTime<Utc>,
     pub modified: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +171,7 @@ impl Item {
             favorite: false,
             fields: Vec::new(),
             history: Vec::new(),
+            passkeys: Vec::new(),
             created: now,
             modified: now,
             password_modified: None,
@@ -266,6 +297,27 @@ pub fn merge(base: Option<&Item>, local: &Item, remote: &Item) -> Item {
     }
     merged.history.retain(|h| h.password != merged.password);
     merged.history.truncate(HISTORY_LIMIT);
+    // Passkeys: those on both sides, plus those added on one side since the
+    // base (one deleted on a side stays deleted); the higher counter wins.
+    let in_base = |id: &str| base.is_some_and(|b| b.passkeys.iter().any(|p| p.credential_id == id));
+    let mut passkeys: Vec<Passkey> = Vec::new();
+    for p in local.passkeys.iter().chain(&remote.passkeys) {
+        if passkeys.iter().any(|q| q.credential_id == p.credential_id) {
+            continue;
+        }
+        let on_l = local.passkeys.iter().find(|q| q.credential_id == p.credential_id);
+        let on_r = remote.passkeys.iter().find(|q| q.credential_id == p.credential_id);
+        let keep = match (on_l, on_r) {
+            (Some(_), Some(_)) => true,
+            _ => !in_base(&p.credential_id),
+        };
+        if keep {
+            let mut p = p.clone();
+            p.counter = on_l.map_or(0, |q| q.counter).max(on_r.map_or(0, |q| q.counter));
+            passkeys.push(p);
+        }
+    }
+    merged.passkeys = passkeys;
     merged
 }
 
@@ -296,11 +348,11 @@ mod tests {
 
     #[test]
     fn unknown_fields_survive() {
-        let json = r#"{"id":"x","name":"A","created":"2024-01-01T00:00:00Z","modified":"2024-01-01T00:00:00Z","passkeys":[{"rp":"example.com"}]}"#;
+        let json = r#"{"id":"x","name":"A","created":"2024-01-01T00:00:00Z","modified":"2024-01-01T00:00:00Z","sharing":[{"group":"family"}]}"#;
         let item: Item = serde_json::from_str(json).unwrap();
         assert_eq!(item.name, "A");
         let back = serde_json::to_string(&item).unwrap();
-        assert!(back.contains(r#""passkeys":[{"rp":"example.com"}]"#));
+        assert!(back.contains(r#""sharing":[{"group":"family"}]"#));
     }
 
     #[test]

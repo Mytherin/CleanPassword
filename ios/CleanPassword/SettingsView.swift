@@ -124,7 +124,7 @@ struct SettingsView: View {
         do {
             let r = try await store.change { try $0.importFile(text: text, password: password) }
             importPassword = ""
-            importResult = (["Imported \(r.added) item(s)" + (r.skipped > 0 ? "; \(r.skipped) were already here." : ".")] + r.warnings).joined(separator: "\n\n")
+            importResult = (["Imported \(r.added) item(s)" + (r.skipped > 0 ? "; \(r.skipped) were already here." : ".") + (r.passkeys > 0 ? " \(r.passkeys) passkey(s) added." : "")] + r.warnings).joined(separator: "\n\n")
         } catch {
             self.error = message(error)
         }

@@ -13,6 +13,11 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
   - Apple-style `dobdyp-1ruzfa-hiFtoz` is the default.
   - Random (length and character classes) and EFF-wordlist passphrases are also available.
   - On sites in Apple's password-rules list, or with a `passwordrules` attribute, it follows the site's rules.
+- **Passkeys**, as in Apple's and Google's password managers:
+  - Sites save new passkeys in CleanPassword: in Chrome, and on the iPhone in Safari and apps.
+  - You sign in with them from a CleanPassword window, from the sign-in field's menu, or, on the iPhone, from the suggestions above the keyboard.
+  - Each passkey is kept on its site's login, encrypted and synced like everything else, and listed under **Passkeys**.
+  - They're P-256 (ES256) keys with the "backed up" flag set, as synced passkeys have. Bitwarden's passkeys import with their logins, and export back.
 - **One-time codes** (TOTP): RFC 6238 with SHA-1/256/512, `otpauth://` URIs and Steam codes.
 - **Password history:** every changed password is kept, the last 20 per item.
 - **Trash:** deleted items can be recovered for 30 days.
@@ -22,7 +27,7 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
   - An edit beats a delete.
   - Everything works offline and syncs later.
 - **Import:**
-  - Bitwarden JSON, including **password-protected exports**, which are decrypted in the core so no plaintext copy of the vault needs to touch the disk.
+  - Bitwarden JSON, including **password-protected exports**, which are decrypted in the core so no plaintext copy of the vault needs to touch the disk. **Passkeys come along.** Importing the same export again adds any passkeys missing from logins imported earlier.
   - Bitwarden CSV.
   - CSV from Chrome, Edge, Safari/Apple Passwords, Firefox, 1Password and LastPass.
 - **Export:** unencrypted Bitwarden JSON, which most password managers import.
@@ -38,12 +43,16 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 - **Multi-step sign-ins** (user name, then password, then code) remember the login you chose for the next step.
 - **Generated passwords are saved immediately**, so they can't be lost if the sign-up fails.
 - **Save / Update prompts** after you sign in with a password that isn't saved, or has changed.
+- **Passkeys:**
+  - When a site creates a passkey or signs in with one, CleanPassword asks in a window of its own, which the page can't cover or click into. There you can save the passkey, choose one, or **use another device or security key**, which hands over to Chrome's own passkeys.
+  - Sites that offer passkeys in their sign-in field get them in the inline menu.
+  - Requests CleanPassword can't serve go to Chrome as if it weren't installed: embedded frames, keys other than P-256, and sites it has no passkey for.
 - **Shortcuts:** Ctrl+Shift+L (⌘⇧L) fills the best login, Ctrl+Shift+9 fills a strong password, Ctrl+Shift+Y opens the popup. The right-click menu offers the same.
 - **Auto-lock** after 15 minutes without use (configurable), and when the computer locks.
 
 ### iPhone app
 
-- **The Passwords screen, as in Apple's Passwords app:** tiles for **All**, **Codes**, **Security** and **Deleted** with their counts, your folders below them, and search across everything. The "…" menu has Settings, the generator and Lock Now; the bottom toolbar shows the sync status and New Password.
+- **The Passwords screen, as in Apple's Passwords app:** tiles for **All**, **Passkeys**, **Codes**, **Security** and **Deleted** with their counts, your folders below them, and search across everything. The "…" menu has Settings, the generator and Lock Now; the bottom toolbar shows the sync status and New Password.
   - **All and folders** list items by name in letter sections. Touch and hold an item to copy its user name, password or code, or to delete it.
   - **Codes** shows each item's current verification code with a countdown ring; tap one to copy it.
   - **Security** lists reused passwords, then weak ones.
@@ -52,7 +61,10 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 - The Chrome popup has the same tiles, under the logins for the current site.
 - **Face ID unlock.** It's optional, uses a keychain item readable only after biometric authentication, and is forgotten when the enrolled faces change.
 - **Auto-lock** after time in the background.
-- **The AutoFill extension** works from the keyboard, the QuickType suggestions and Safari. It unlocks with Face ID or the master password. The suggestions above the keyboard register only user names and websites with iOS, never passwords.
+- **The AutoFill extension** works from the keyboard, the QuickType suggestions, and Safari and apps, for passwords and **passkeys** (iOS 17’s passkey provider). It unlocks with Face ID or the master password.
+  - **New passkeys:** “Save a passkey for …?” saves the passkey on the site’s login, or a new one, and syncs it at once.
+  - **The suggestions above the keyboard** register only user names, websites and passkey ids with iOS, never passwords or keys.
+  - **Turning it on:** in Settings → General → AutoFill & Passwords, turn on CleanPassword.
 - **Copied passwords** stay on this device (no Universal Clipboard) and are cleared after 90 seconds.
 
 ## Security model
@@ -198,7 +210,7 @@ docs/        autofill design and research
 
 ## Not yet
 
-- **Passkeys.** They can't be imported between managers. Storing new ones needs the passkey provider APIs on both platforms.
+- **Passkeys in embedded frames** in Chrome (Chrome handles those), and passkeys of key types other than P-256.
 - **One-time codes in iOS AutoFill:** iOS 18's `ProvidesOneTimeCodes`.
 - **Saving new passwords from iOS AutoFill.** iOS doesn't let third-party providers do it before iOS 18's new APIs; add them in the app for now.
 - **Sharing vaults between people:** one vault per bucket folder for now.

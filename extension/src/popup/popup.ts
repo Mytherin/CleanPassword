@@ -222,8 +222,10 @@ async function home(): Promise<void> {
     // The tiles of Apple's Passwords app, then the folders.
     const [findings, trash] = await Promise.all([ask<unknown[]>("audit"), ask<Item[]>("trash")]);
     const codes = items.filter((i) => i.totp);
+    const withPasskeys = items.filter((i) => i.passkeys?.length);
     nodes.push(h("div", { class: "tiles" },
       tile("All", "🔑", "#0a84ff", items.length, () => void category("All", items)),
+      tile("Passkeys", "👤", "#34c759", withPasskeys.length, () => void category("Passkeys", withPasskeys)),
       tile("Codes", "⏱", "#5e5ce6", codes.length, () => void codesView(codes)),
       tile("Security", "⚠", "#ff3b30", findings.length, () => void audit(home)),
       tile("Deleted", "🗑", "#ff9500", trash.length, () => void trashView(home)),
@@ -344,6 +346,16 @@ async function detail(id: string): Promise<void> {
   if (i.uris.length) {
     cards.push(h("div", { class: "card" }, ...i.uris.map((u) =>
       field("Website", u.uri, h("button", { class: "btn small", onclick: () => chrome.tabs.create({ url: u.uri.includes("://") ? u.uri : `https://${u.uri}` }) }, "Open")))));
+  }
+  if (i.passkeys?.length) {
+    cards.push(h("div", { class: "card" }, ...i.passkeys.map((p) =>
+      field("Passkey", `${p.user_name || "No user name"} · ${p.rp_id} · created ${new Date(p.created).toLocaleDateString()}`,
+        h("button", { class: "btn small danger", onclick: async () => {
+          if (!confirm(`Delete this passkey? You won't be able to sign in to ${p.rp_id} with it any more (remove it on the site too).`)) return;
+          clearInterval(timer);
+          await ask("delete-passkey", { id, credentialId: p.credential_id });
+          await detail(id);
+        } }, "Delete")))));
   }
   if (i.fields.length) cards.push(h("div", { class: "card" }, ...i.fields.map((f) => (f.hidden ? secretField(f.name, f.value) : field(f.name, f.value, copyButton(() => f.value))))));
   if (i.notes) cards.push(h("div", { class: "card" }, field("Notes", h("div", { style: "white-space:pre-wrap" }, i.notes))));

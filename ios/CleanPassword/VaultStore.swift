@@ -176,7 +176,11 @@ final class VaultStore: ObservableObject {
         if let t = backgroundedAt, Date().timeIntervalSince(t) >= TimeInterval(autoLockSeconds), phase == .unlocked {
             lock()
         } else if phase == .unlocked {
-            sync()
+            Task {
+                // The AutoFill extension may have saved a passkey meanwhile.
+                if await Core.shared.reloadIfChangedOnDisk() { await reload() }
+                sync()
+            }
         }
         backgroundedAt = nil
     }

@@ -104,6 +104,11 @@ function render(): void {
       root.append(row(h("span", { class: "mono", style: "background:var(--ok)" }, "✓"), "Use strong password", s.suggestion, (e) => void act(e, () => ask("menu-generate", { token })), "suggest"));
       rows[rows.length - 1].querySelector(".sub")!.classList.add("secret");
     }
+    // The page asked for a passkey in its sign-in field: those first.
+    for (const p of s.passkeys ?? []) {
+      root.append(row(h("span", { class: "mono", style: "background:var(--accent)" }, "🔑"), p.user_name || p.user_display_name || p.item_name, `Passkey · ${p.item_name}`,
+        (e) => void act(e, () => ask("menu-passkey", { token, itemId: p.item_id, credentialId: p.credential_id })), "passkey"));
+    }
     let matches = s.matches;
     if (s.role === "otp") matches = matches.filter((m) => s.totpIds.includes(m.id));
     if (s.role !== "new-password" && s.role !== "confirm-password") {

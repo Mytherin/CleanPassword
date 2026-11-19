@@ -14,6 +14,7 @@ struct ItemDetailView: View {
     @State private var editing = false
     @State private var confirmDelete = false
     @State private var copied: String?
+    @State private var deletingPasskey: PasskeyInfo?
 
     private var item: VaultItem? { store.items.first { $0.id == id } }
 
@@ -54,6 +55,30 @@ struct ItemDetailView: View {
                     }
                 }
             }
+            if !item.passkeys.isEmpty {
+                Section {
+                    ForEach(item.passkeys, id: \.id) { p in
+                        HStack(spacing: 12) {
+                            Image(systemName: "person.badge.key.fill").foregroundStyle(.tint)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(p.userName.isEmpty ? p.rpId : p.userName)
+                                Text("\(p.rpId) · created \(Date(timeIntervalSince1970: TimeInterval(p.created)).formatted(date: .abbreviated, time: .omitted))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .swipeActions {
+                            Button("Delete", role: .destructive) { deletingPasskey = p }
+                        }
+                        .contextMenu {
+                            Button(role: .destructive) { deletingPasskey = p } label: { Label("Delete Passkey", systemImage: "trash") }
+                        }
+                    }
+                } header: {
+                    Text("Passkeys")
+                } footer: {
+                    Text("Signs you in to \(item.passkeys[0].rpId) with Face ID instead of a password.")
+                }
+            }
             if !f.fields.isEmpty {
                 Section("Fields") {
                     ForEach(Array(f.fields.enumerated()), id: \.offset) { n, c in
@@ -84,6 +109,16 @@ struct ItemDetailView: View {
         }
         .sheet(isPresented: $editing) {
             NavigationStack { ItemEditView(item: item) }
+        }
+        .confirmationDialog("Delete this passkey?", isPresented: Binding(get: { deletingPasskey != nil }, set: { if !$0 { deletingPasskey = nil } }), titleVisibility: .visible) {
+            Button("Delete Passkey", role: .destructive) {
+                if let p = deletingPasskey {
+                    Task { try? await store.change { try $0.deletePasskey(itemId: item.id, id: p.id) } }
+                }
+                deletingPasskey = nil
+            }
+        } message: {
+            Text("You won't be able to sign in to \(deletingPasskey?.rpId ?? "the site") with it any more. Remove it on the site too.")
         }
         .confirmationDialog("Move “\(f.name)” to Deleted?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
