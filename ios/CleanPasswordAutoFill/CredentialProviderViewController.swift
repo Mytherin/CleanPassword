@@ -195,7 +195,7 @@ final class ExtensionModel: ObservableObject {
     /// The logins a new passkey can go on.
     var registrationLogins: [SuggestedLogin] {
         guard let r = registration, let s = session else { return [] }
-        return s.matches(url: r.rpId).filter { !$0.related }
+        return s.siteLogins(url: r.rpId).filter { !$0.related }
     }
 
     func savePasskey(on itemId: String?) async {

@@ -448,7 +448,7 @@ mod tests {
         let item = v.get(&r.item_id).unwrap();
         assert_eq!((item.name.as_str(), item.username.as_str()), ("Example", "alice@example.com"));
         assert_eq!(item.passkeys.len(), 1);
-        assert!(v.matches("https://example.com/login").iter().any(|m| m.id == r.item_id));
+        assert!(v.site_logins("https://example.com/login").iter().any(|m| m.id == r.item_id));
 
         // The attestation: fmt none, and authenticator data with flags,
         // counter 0, our AAGUID, the id and a COSE ES256 key.

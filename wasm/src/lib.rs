@@ -184,6 +184,13 @@ impl Session {
         self.with(|v| to_js(&v.matches(url)))?.map_err(bad)
     }
 
+    /// Every login saved for a page, passkey-only ones too (see
+    /// `Vault::site_logins`): `[{id, name, username, quality}]`.
+    #[wasm_bindgen(js_name = siteLogins)]
+    pub fn site_logins(&self, url: &str) -> JsResult<JsValue> {
+        self.with(|v| to_js(&v.site_logins(url)))?.map_err(bad)
+    }
+
     pub fn audit(&self) -> JsResult<JsValue> {
         self.with(|v| to_js(&v.audit()))?.map_err(bad)
     }

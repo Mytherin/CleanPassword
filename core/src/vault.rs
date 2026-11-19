@@ -459,14 +459,26 @@ impl Vault {
             .collect()
     }
 
-    /// Logins for a web page, best first: those saved for this very host,
-    /// then the rest of its domain, then sites sharing its sign-ins;
-    /// favorites first within each.
+    /// Logins to offer for filling a web page, best first: those saved for
+    /// this very host, then the rest of its domain, then sites sharing its
+    /// sign-ins; favorites first within each. A login that is only a passkey
+    /// (no password) isn't offered: it signs in as a passkey, not by filling.
     pub fn matches(&self, url: &str) -> Vec<Match> {
+        self.logins_for(url, false)
+    }
+
+    /// Every login saved for a web page, passkey-only ones too, ordered as
+    /// [`Vault::matches`]: for telling whether a password is already saved,
+    /// or which login a new passkey goes on.
+    pub fn site_logins(&self, url: &str) -> Vec<Match> {
+        self.logins_for(url, true)
+    }
+
+    fn logins_for(&self, url: &str, passkey_only: bool) -> Vec<Match> {
         let Some(page) = matching::parse_page(url) else { return Vec::new() };
         let mut out: Vec<(Quality, bool, &Item)> = Vec::new();
         for i in self.items() {
-            if i.kind != ItemKind::Login {
+            if i.kind != ItemKind::Login || (!passkey_only && i.password.is_empty() && !i.passkeys.is_empty()) {
                 continue;
             }
             if let Some(q) = i.uris.iter().filter_map(|u| matching::match_uri(u, &page)).max() {
@@ -656,6 +668,31 @@ pub(crate) mod tests {
         assert_eq!(m.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), [host.as_str(), domain.as_str()]);
         assert!(v.matches("http://accounts.example.com/").is_empty(), "never on http");
         assert!(v.matches("not a url").is_empty());
+    }
+
+    #[test]
+    fn passkey_only_logins_are_not_offered_for_filling() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let with_pw = v.add(login("Example", "https://example.com", "alice", "p")).unwrap();
+        let req = crate::passkey::NewPasskey {
+            rp_id: "example.com".into(),
+            rp_name: "Example".into(),
+            user_handle: b"bob".to_vec(),
+            user_name: "bob@example.com".into(),
+            user_display_name: "Bob".into(),
+        };
+        let pk = v.create_passkey(&req, None).unwrap().item_id;
+        assert_ne!(pk, with_pw, "bob's passkey gets a login of its own");
+        let ids = |m: Vec<Match>| m.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(ids(v.matches("https://example.com/login")), [with_pw.clone()]);
+        let all = ids(v.site_logins("https://example.com/login"));
+        assert!(all.contains(&with_pw) && all.contains(&pk));
+
+        // Given a password, it fills like any login.
+        let mut data = v.get(&pk).unwrap().data();
+        data.password = "secret".into();
+        v.update(&pk, data).unwrap();
+        assert!(ids(v.matches("https://example.com/login")).contains(&pk));
     }
 
     #[test]

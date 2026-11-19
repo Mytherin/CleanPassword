@@ -373,6 +373,10 @@ fn code_record(c: totp::Code) -> OneTimeCode {
     OneTimeCode { code: c.code, period: c.period, remaining: c.remaining }
 }
 
+fn suggested(m: vault::Match) -> SuggestedLogin {
+    SuggestedLogin { id: m.id, name: m.name, username: m.username, exact: m.quality == Quality::Host, related: m.quality == Quality::Related }
+}
+
 fn now() -> u64 {
     Utc::now().timestamp().max(0) as u64
 }
@@ -486,14 +490,16 @@ impl VaultSession {
         self.v().search(&query).into_iter().map(item_record).collect()
     }
 
-    /// Logins for a website (a URL or a domain, as AutoFill gives them),
-    /// best first.
+    /// Logins to fill for a website (a URL or a domain, as AutoFill gives
+    /// them), best first; not those that are only a passkey.
     pub fn matches(&self, url: String) -> Vec<SuggestedLogin> {
-        self.v()
-            .matches(&url)
-            .into_iter()
-            .map(|m| SuggestedLogin { id: m.id, name: m.name, username: m.username, exact: m.quality == Quality::Host, related: m.quality == Quality::Related })
-            .collect()
+        self.v().matches(&url).into_iter().map(suggested).collect()
+    }
+
+    /// Every login for a website, passkey-only ones too: those a new
+    /// passkey can go on.
+    pub fn site_logins(&self, url: String) -> Vec<SuggestedLogin> {
+        self.v().site_logins(&url).into_iter().map(suggested).collect()
     }
 
     pub fn add(&self, fields: ItemFields) -> R<String> {

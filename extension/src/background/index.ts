@@ -403,7 +403,7 @@ async function submitted(frame: FrameRef, s: Submission): Promise<void> {
     return;
   }
 
-  const matches = (session.matches(frame.url) as Match[]).filter((m) => m.quality !== "related");
+  const matches = (session.siteLogins(frame.url) as Match[]).filter((m) => m.quality !== "related");
   const items = matches.map((m) => session!.get(m.id) as Item);
   let target: Item | undefined;
   if (username) target = items.find((i) => i.username.toLowerCase() === username.toLowerCase());
@@ -599,7 +599,7 @@ function passkeyState(token: string): PasskeyState | null {
     choices: s && r.kind === "get" ? (s.passkeysFor(r.rpId, idsOf(o.allowCredentials)) as PasskeyChoice[]) : [],
     logins:
       s && r.kind === "create"
-        ? (s.matches("https://" + r.rpId) as Match[]).filter((m) => m.quality !== "related").map((m) => ({ id: m.id, name: m.name, username: m.username }))
+        ? (s.siteLogins("https://" + r.rpId) as Match[]).filter((m) => m.quality !== "related").map((m) => ({ id: m.id, name: m.name, username: m.username }))
         : [],
     excluded: !!s && r.kind === "create" && (s.passkeyExcluded(r.rpId, idsOf(o.excludeCredentials)) as boolean),
   };
