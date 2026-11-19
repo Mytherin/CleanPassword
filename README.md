@@ -72,7 +72,7 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 | Where | What it holds |
 |---|---|
 | **S3** (`<folder>/vault.json`) | Vault id, Argon2id settings and salt, and the **vault key** sealed with the master key. |
-| **S3** (`<folder>/items/<uuid>.bin`) | One item each, sealed with the vault key, padded to 512-byte blocks. |
+| **S3** (`<folder>/vault.bin`) | Every item, sealed together with the vault key, padded to blocks of 16 KiB (or an eighth of its size, for a large vault). |
 | **Each device** (`chrome.storage.local`, or a file in the iOS App Group) | The S3 settings and `vault.json` in clear. Everything else is sealed with the vault key: the **AWS access key**, the items, and sync state. |
 | **Chrome, while unlocked** | The vault key in `chrome.storage.session`: memory only, not readable by content scripts. Removed when the vault locks. |
 | **iPhone, with Face ID on** | The vault key in the keychain, `ThisDeviceOnly` and `biometryCurrentSet`. |
@@ -81,20 +81,19 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 - **Master key:** Argon2id of the master password, with 46 MiB memory, 3 passes and 1 lane. That's above OWASP's recommendation and fits iOS's AutoFill memory limit. The settings are stored with the vault, so they can be raised later.
 - **Vault key:** 32 random bytes, wrapped by the master key. Changing the master password re-wraps this one key instead of re-encrypting everything.
 
-**Encryption.** Everything is sealed with XChaCha20-Poly1305 and a random nonce. The associated data names the vault and item id, so ciphertexts can't be moved between items or vaults. Keys are wiped from memory when dropped.
+**Encryption.** Everything is sealed with XChaCha20-Poly1305 and a random nonce. The associated data names the vault (and what's sealed), so ciphertexts can't be moved between vaults. Keys are wiped from memory when dropped.
 
 **What S3 and anyone with access to the bucket can see:**
-- the number of items
-- their padded sizes
-- when they change
+- the vault's padded size (roughly how big it is, not how many items it holds)
+- when it changes
 
 They never see names, websites, user names or passwords.
 
 Limits that can't be avoided without a server:
-- Whoever controls the bucket can delete items or serve an older version of one.
+- Whoever controls the bucket can delete the vault or serve an older version of it.
 - An HTTPS man-in-the-middle with a trusted certificate could do the same.
 
-They can't read or forge items. Turn on **S3 versioning**, so a deleted or overwritten item can be restored.
+They can't read or forge items. Every device keeps a full copy, and a sync never takes a missing `vault.bin` to mean the items were deleted. Turn on **S3 versioning** too, so an overwritten vault can be restored.
 
 **Autofill.** See [docs/autofill.md](docs/autofill.md). In short:
 - The content script in web pages never sees the vault.
@@ -109,7 +108,7 @@ They can't read or forge items. Turn on **S3 versioning**, so a deleted or overw
 
 ## Setting up AWS
 
-1. Create a bucket. Keep "Block all public access" on. **Turn on versioning**: it keeps old versions of items as a backup.
+1. Create a bucket. Keep "Block all public access" on. **Turn on versioning**: it keeps old versions of the vault as a backup.
 2. In IAM, create a user without console access, with this inline policy (replace `BUCKET`, and `CleanPassword` if you choose another folder):
 
    ```json
@@ -117,7 +116,7 @@ They can't read or forge items. Turn on **S3 versioning**, so a deleted or overw
      "Version": "2012-10-17",
      "Statement": [
        { "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::BUCKET" },
-       { "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+       { "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"],
          "Resource": "arn:aws:s3:::BUCKET/CleanPassword/*" }
      ]
    }
@@ -126,10 +125,10 @@ They can't read or forge items. Turn on **S3 versioning**, so a deleted or overw
    `s3:ListBucket` has no folder condition on purpose: without list permission that applies to every request, S3 answers "access denied" instead of "not found" for a missing object, and CleanPassword couldn't tell a new folder from a forbidden one. The cost is that the key can list the names of every object in the bucket, so give CleanPassword a bucket of its own.
 3. Create an access key for that user ("Application running outside AWS") and enter it in the extension or the app, with the bucket, its region and the folder.
 
-**Sharing a folder with CleanNotes.** CleanPassword can use the same bucket, folder and access key as [CleanNotes](../CleanNotes): enter CleanNotes' folder (e.g. `CleanNotes`) instead of `CleanPassword` when setting up. The two apps' objects don't overlap, and each ignores the other's:
+**Sharing a folder with CleanNotes.** CleanPassword can use the same bucket, folder and access key as [CleanNotes](../CleanNotes) (whose policy also needs `s3:DeleteObject`): enter CleanNotes' folder (e.g. `CleanNotes`) instead of `CleanPassword` when setting up. The two apps' objects don't overlap, and each ignores the other's:
 
 ```text
-<folder>/vault.json, items/…                                       CleanPassword
+<folder>/vault.json, vault.bin                                     CleanPassword
 <folder>/head, notes/…, folders/…, attachments/…, encryption.json   CleanNotes
 ```
 

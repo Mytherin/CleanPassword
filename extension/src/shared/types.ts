@@ -64,7 +64,6 @@ export interface SyncReport {
   uploaded: number;
   removed: number;
   merged: number;
-  unreadable: number;
   pending: number;
   password_changed_elsewhere: boolean;
 }

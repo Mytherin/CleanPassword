@@ -272,7 +272,7 @@ try {
   await ask("sync");
   const keys = [...s3.objects.keys()];
   const all = [...s3.objects.values()].map((o) => o.body.toString("latin1")).join("\n");
-  check("uploads one object per item", keys.filter((k) => k.includes("/items/")).length >= 3, keys.join(", "));
+  check("keeps the vault in two objects", keys.length === 2 && keys.some((k) => k.endsWith("/vault.bin")) && keys.some((k) => k.endsWith("/vault.json")), keys.join(", "));
   check("S3 never sees names, user names or passwords", !/alice|carol|s3cret|typed-by-hand|Test site|127\.0\.0\.1/.test(all));
 
   // Passkeys: a site creates one (confirmed in CleanPassword's window), then
@@ -379,8 +379,9 @@ try {
   await popup.click("button[type=submit]");
   await popup.waitForSelector("input.search", { timeout: 20000 });
   const seen = await popup.evaluate(() => window.seen);
-  check("shows progress while unlocking and downloading a vault", seen[0]?.startsWith("Unlocking") && seen.includes(`Downloading your passwords… ${countBefore} of ${countBefore}`), JSON.stringify(seen));
-  check("and has every item once it's done", (await ask("items")).length === countBefore);
+  check("shows progress while unlocking and downloading a vault", seen[0]?.startsWith("Unlocking") && seen.includes("Downloading your passwords…"), JSON.stringify(seen));
+  const countAfter = (await ask("items")).length;
+  check("and has every item once it's done", countAfter === countBefore, `${countAfter} of ${countBefore}`);
 } finally {
   await browser.close();
   web.close();

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::item::{Item, ItemData, ItemKind, ItemUri, Passkey};
-use crate::vault::{ItemState, Vault};
+use crate::vault::Vault;
 use crate::{matching, Error, Result};
 
 /// CleanPassword's authenticator model id (random, fixed).
@@ -285,15 +285,14 @@ impl Vault {
         let now = Utc::now();
         let item_id = match target {
             Some(id) => {
-                let st = self.s.items.get_mut(&id).expect("found above");
+                let item = self.s.items.get_mut(&id).expect("found above");
                 // One passkey per account and site: a new one replaces it.
-                st.item.passkeys.retain(|p| !(p.rp_id == rp_id && p.user_handle == handle));
-                st.item.passkeys.push(passkey);
-                if st.item.username.is_empty() {
-                    st.item.username = req.user_name.clone();
+                item.passkeys.retain(|p| !(p.rp_id == rp_id && p.user_handle == handle));
+                item.passkeys.push(passkey);
+                if item.username.is_empty() {
+                    item.username = req.user_name.clone();
                 }
-                st.item.modified = now;
-                st.dirty = true;
+                item.modified = now;
                 id
             }
             None => {
@@ -302,7 +301,7 @@ impl Vault {
                 let mut item = Item::new(data, now);
                 item.passkeys.push(passkey);
                 let id = item.id.clone();
-                self.s.items.insert(id.clone(), ItemState { item, base: None, etag: None, dirty: true });
+                self.s.items.insert(id.clone(), item);
                 id
             }
         };
@@ -316,9 +315,8 @@ impl Vault {
         if client_data_hash.len() != 32 {
             return Err(Error::invalid("the client data hash must be 32 bytes"));
         }
-        let st = self.s.items.get_mut(item_id).ok_or(Error::NotFound)?;
-        let p = st
-            .item
+        let item = self.s.items.get_mut(item_id).ok_or(Error::NotFound)?;
+        let p = item
             .passkeys
             .iter_mut()
             .find(|p| unb64(&p.credential_id).is_ok_and(|id| id == credential_id))
@@ -329,7 +327,6 @@ impl Vault {
         let sk = signing_key(p)?;
         if p.counter > 0 {
             p.counter += 1;
-            st.dirty = true;
         }
         let data = auth_data(&p.rp_id, UP | UV | BE | BS, p.counter, None);
         let mut signed = data.clone();
@@ -341,14 +338,13 @@ impl Vault {
     /// Removes a passkey from an item (the site keeps its public key until
     /// removed there too).
     pub fn delete_passkey(&mut self, item_id: &str, credential_id: &str) -> Result<()> {
-        let st = self.s.items.get_mut(item_id).ok_or(Error::NotFound)?;
-        let before = st.item.passkeys.len();
-        st.item.passkeys.retain(|p| p.credential_id != credential_id);
-        if st.item.passkeys.len() == before {
+        let item = self.s.items.get_mut(item_id).ok_or(Error::NotFound)?;
+        let before = item.passkeys.len();
+        item.passkeys.retain(|p| p.credential_id != credential_id);
+        if item.passkeys.len() == before {
             return Err(Error::NotFound);
         }
-        st.item.modified = Utc::now();
-        st.dirty = true;
+        item.modified = Utc::now();
         Ok(())
     }
 }
@@ -491,7 +487,7 @@ mod tests {
         let cdh = [7u8; 32];
         let s = v.assert_passkey(&r.item_id, &r.credential_id, "example.com", &cdh).unwrap();
         assert_eq!(&s.authenticator_data[33..37], &[0, 0, 0, 0]);
-        v.s.items.get_mut(&r.item_id).unwrap().item.passkeys[0].counter = 41;
+        v.s.items.get_mut(&r.item_id).unwrap().passkeys[0].counter = 41;
         let s = v.assert_passkey(&r.item_id, &r.credential_id, "example.com", &cdh).unwrap();
         assert_eq!(&s.authenticator_data[33..37], &[0, 0, 0, 42]);
     }

@@ -5,12 +5,12 @@
 //! ```text
 //! <folder>/vault.json         the vault's id, Argon2id settings and salt, and
 //!                             the vault key wrapped by the master key
-//! <folder>/items/<id>.bin     one item, sealed with the vault key
+//! <folder>/vault.bin          every item, sealed with the vault key
 //! ```
 //!
-//! S3 (and anyone who can read the bucket) sees only the number of items,
-//! their padded sizes and when they changed: never names, websites, user
-//! names or passwords.
+//! S3 (and anyone who can read the bucket) sees only the vault's padded
+//! size and when it changed: not even how many items it holds, let alone
+//! names, websites, user names or passwords.
 //!
 //! **On each device** the app keeps one string ([`Vault::save`]): the S3
 //! settings (bucket, region, folder), the vault's header, and everything
@@ -38,6 +38,10 @@ pub const TRASH_DAYS: i64 = 30;
 
 const VAULT_FORMAT: &str = "cleanpassword-vault";
 const DEVICE_FORMAT: &str = "cleanpassword-device";
+/// 2: all items in one object, `vault.bin` (1 had an object per item).
+pub(crate) const VAULT_VERSION: u32 = 2;
+/// 2: [`Secrets`] keeps the items and their synced copies as two maps.
+const DEVICE_VERSION: u32 = 2;
 
 /// Where the vault lives.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +122,7 @@ impl VaultHeader {
     fn new(vault_id: String, password: &str, key: &[u8; 32], created: DateTime<Utc>) -> Result<VaultHeader> {
         let kdf = KdfParams::new();
         let master = crypto::derive_key(password, &kdf)?;
-        let mut h = VaultHeader { format: VAULT_FORMAT.into(), version: 1, vault_id, kdf, wrapped_key: String::new(), created };
+        let mut h = VaultHeader { format: VAULT_FORMAT.into(), version: VAULT_VERSION, vault_id, kdf, wrapped_key: String::new(), created };
         h.wrapped_key = crypto::b64(&crypto::seal(&master, &h.wrap_aad(), key));
         Ok(h)
     }
@@ -131,7 +135,12 @@ impl VaultHeader {
         if self.format != VAULT_FORMAT {
             return Err(Error::invalid("this folder's vault.json isn't a CleanPassword vault"));
         }
-        if self.version != 1 {
+        if self.version < VAULT_VERSION {
+            return Err(Error::invalid(
+                "this folder holds a vault made by an older version of CleanPassword, which this one can't read; set up a new vault in another folder and import your passwords again",
+            ));
+        }
+        if self.version > VAULT_VERSION {
             return Err(Error::invalid("this vault was made by a newer version of CleanPassword; update the app"));
         }
         Ok(())
@@ -148,39 +157,21 @@ impl VaultHeader {
     }
 }
 
-/// An item and its sync state.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct ItemState {
-    pub item: Item,
-    /// The version last synced (what merges start from).
-    #[serde(default)]
-    pub base: Option<Item>,
-    /// Its S3 ETag; `None` if it was never uploaded.
-    #[serde(default)]
-    pub etag: Option<String>,
-    /// Changed here since the last sync.
-    #[serde(default)]
-    pub dirty: bool,
-}
-
-/// An item deleted for good, waiting for its tombstone to be uploaded, or a
-/// tombstone seen in S3 (cleaned up after [`TRASH_DAYS`]).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Gone {
-    pub etag: Option<String>,
-    pub at: DateTime<Utc>,
-}
-
 /// Everything sealed on the device.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Secrets {
     pub credentials: AwsCredentials,
+    /// The items, by id.
     #[serde(default)]
-    pub items: BTreeMap<String, ItemState>,
+    pub items: BTreeMap<String, Item>,
+    /// The items as `vault.bin` held them when this device last synced:
+    /// what merges start from. An item that differs from its copy here was
+    /// changed here; one missing from `items` was deleted for good here.
     #[serde(default)]
-    pub purges: BTreeMap<String, Gone>,
+    pub base: BTreeMap<String, Item>,
+    /// `vault.bin`'s ETag as last synced; `None` until it's uploaded.
     #[serde(default)]
-    pub tombstones: BTreeMap<String, Gone>,
+    pub etag: Option<String>,
     /// `vault.json`'s ETag; `None` until it's uploaded.
     #[serde(default)]
     pub header_etag: Option<String>,
@@ -188,13 +179,6 @@ pub(crate) struct Secrets {
     /// uploading.
     #[serde(default)]
     pub header_dirty: bool,
-    /// `vault-head`'s ETag as of the last full listing (see
-    /// [`crate::sync`]): unchanged, nothing was written since.
-    #[serde(default)]
-    pub head_cursor: Option<String>,
-    /// When the folder was last listed in full.
-    #[serde(default)]
-    pub listed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -320,7 +304,7 @@ impl Vault {
         let data = crypto::b64(&crypto::seal(&self.key, &device_aad(&self.header.vault_id), &plain));
         let saved = Saved {
             format: DEVICE_FORMAT.into(),
-            version: 1,
+            version: DEVICE_VERSION,
             config: self.config.clone(),
             header: self.header.clone(),
             data,
@@ -360,27 +344,27 @@ impl Vault {
 
     /// Whether anything here hasn't been uploaded yet.
     pub fn has_unsynced_changes(&self) -> bool {
-        self.s.header_dirty || !self.s.purges.is_empty() || self.s.items.values().any(|s| s.dirty) || self.s.header_etag.is_none()
+        self.s.header_dirty || self.s.header_etag.is_none() || self.s.etag.is_none() || self.s.items != self.s.base
     }
 
     // ---- Items -----------------------------------------------------------
 
     /// Items not in the trash, by name.
     pub fn items(&self) -> Vec<&Item> {
-        let mut v: Vec<&Item> = self.s.items.values().map(|s| &s.item).filter(|i| i.deleted.is_none()).collect();
+        let mut v: Vec<&Item> = self.s.items.values().filter(|i| i.deleted.is_none()).collect();
         v.sort_by_cached_key(|i| (i.name.to_lowercase(), i.username.to_lowercase(), i.id.clone()));
         v
     }
 
     /// Items in the trash, most recently deleted first.
     pub fn trash(&self) -> Vec<&Item> {
-        let mut v: Vec<&Item> = self.s.items.values().map(|s| &s.item).filter(|i| i.deleted.is_some()).collect();
+        let mut v: Vec<&Item> = self.s.items.values().filter(|i| i.deleted.is_some()).collect();
         v.sort_by_key(|i| std::cmp::Reverse(i.deleted));
         v
     }
 
     pub fn get(&self, id: &str) -> Option<&Item> {
-        self.s.items.get(id).map(|s| &s.item)
+        self.s.items.get(id)
     }
 
     /// Folder names in use, sorted.
@@ -402,46 +386,40 @@ impl Vault {
         }
         let item = Item::new(data, Utc::now());
         let id = item.id.clone();
-        self.s.items.insert(id.clone(), ItemState { item, base: None, etag: None, dirty: true });
+        self.s.items.insert(id.clone(), item);
         Ok(id)
     }
 
     /// Changes an item; returns whether anything changed.
     pub fn update(&mut self, id: &str, data: ItemData) -> Result<bool> {
-        let st = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
-        let changed = st.item.apply(data, Utc::now());
-        st.dirty |= changed;
-        Ok(changed)
+        let item = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
+        Ok(item.apply(data, Utc::now()))
     }
 
     /// Moves an item to the trash.
     pub fn delete(&mut self, id: &str) -> Result<()> {
-        let st = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
-        if st.item.deleted.is_none() {
+        let item = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
+        if item.deleted.is_none() {
             let now = Utc::now();
-            st.item.deleted = Some(now);
-            st.item.modified = now;
-            st.dirty = true;
+            item.deleted = Some(now);
+            item.modified = now;
         }
         Ok(())
     }
 
     pub fn restore(&mut self, id: &str) -> Result<()> {
-        let st = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
-        if st.item.deleted.is_some() {
-            st.item.deleted = None;
-            st.item.modified = Utc::now();
-            st.dirty = true;
+        let item = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
+        if item.deleted.is_some() {
+            item.deleted = None;
+            item.modified = Utc::now();
         }
         Ok(())
     }
 
-    /// Deletes an item for good (from every device, at the next sync).
+    /// Deletes an item for good (from every device, at the next sync,
+    /// unless another device edits it first: an edit beats a delete).
     pub fn purge(&mut self, id: &str) -> Result<()> {
-        let st = self.s.items.remove(id).ok_or(Error::NotFound)?;
-        if st.etag.is_some() {
-            self.s.purges.insert(id.to_owned(), Gone { etag: st.etag, at: Utc::now() });
-        }
+        self.s.items.remove(id).ok_or(Error::NotFound)?;
         Ok(())
     }
 
@@ -451,7 +429,9 @@ impl Vault {
             .s
             .items
             .iter()
-            .filter(|(_, s)| s.item.deleted.is_some_and(|d| now - d > Duration::days(TRASH_DAYS)) && !s.dirty)
+            // Not if trashed here and not synced yet: other devices are to
+            // see it in the trash first.
+            .filter(|(id, i)| i.deleted.is_some_and(|d| now - d > Duration::days(TRASH_DAYS)) && self.s.base.get(*id) == Some(*i))
             .map(|(id, _)| id.clone())
             .collect();
         for id in old {
@@ -523,12 +503,11 @@ impl Vault {
             if let Some(id) = seen.get(&fp).cloned() {
                 // Already here (imported before): bring in passkeys it lacks.
                 summary.skipped += 1;
-                let st = self.s.items.get_mut(&id).expect("listed above");
+                let item = self.s.items.get_mut(&id).expect("listed above");
                 for p in imported.passkeys {
-                    if !st.item.passkeys.iter().any(|q| q.credential_id == p.credential_id) {
-                        st.item.passkeys.push(p);
-                        st.item.modified = Utc::now();
-                        st.dirty = true;
+                    if !item.passkeys.iter().any(|q| q.credential_id == p.credential_id) {
+                        item.passkeys.push(p);
+                        item.modified = Utc::now();
                         summary.passkeys += 1;
                     }
                 }
@@ -536,11 +515,11 @@ impl Vault {
             }
             match self.add(imported.data) {
                 Ok(id) => {
-                    let st = self.s.items.get_mut(&id).expect("just added");
-                    st.item.history = imported.history;
-                    st.item.history.truncate(crate::item::HISTORY_LIMIT);
+                    let item = self.s.items.get_mut(&id).expect("just added");
+                    item.history = imported.history;
+                    item.history.truncate(crate::item::HISTORY_LIMIT);
                     summary.passkeys += imported.passkeys.len();
-                    st.item.passkeys = imported.passkeys;
+                    item.passkeys = imported.passkeys;
                     seen.insert(fp, id);
                     summary.added += 1;
                 }
@@ -568,13 +547,13 @@ impl Vault {
 
 impl Secrets {
     fn new(credentials: AwsCredentials) -> Secrets {
-        Secrets { credentials, items: BTreeMap::new(), purges: BTreeMap::new(), tombstones: BTreeMap::new(), header_etag: None, header_dirty: false, head_cursor: None, listed_at: None }
+        Secrets { credentials, items: BTreeMap::new(), base: BTreeMap::new(), etag: None, header_etag: None, header_dirty: false }
     }
 }
 
 fn parse_saved(saved: &str) -> Result<Saved> {
     let s: Saved = serde_json::from_str(saved).map_err(|_| Error::invalid("the saved vault is damaged"))?;
-    if s.format != DEVICE_FORMAT || s.version != 1 {
+    if s.format != DEVICE_FORMAT || s.version != DEVICE_VERSION {
         return Err(Error::invalid("the saved vault was made by another version of CleanPassword"));
     }
     Ok(s)
@@ -695,7 +674,10 @@ pub(crate) mod tests {
         let mut v = Vault::create(config(), creds(), PW).unwrap();
         let id = v.add(login("A", "https://a.com", "x", "1")).unwrap();
         v.delete(&id).unwrap();
-        v.s.items.get_mut(&id).unwrap().dirty = false;
+        // Trashed here but not synced yet: kept.
+        v.empty_old_trash(Utc::now() + Duration::days(31));
+        assert!(v.get(&id).is_some());
+        v.s.base = v.s.items.clone();
         v.empty_old_trash(Utc::now() + Duration::days(10));
         assert!(v.get(&id).is_some());
         v.empty_old_trash(Utc::now() + Duration::days(31));

@@ -82,7 +82,7 @@ async function withProgress<T>(p: ReturnType<typeof progressBox>, text: string, 
 async function download(p: ReturnType<typeof progressBox>): Promise<void> {
   const listener = (m: { type?: string; done?: number; total?: number }) => {
     if (m?.type === "sync-progress" && typeof m.done === "number" && typeof m.total === "number") {
-      p.show(`Downloading your passwords… ${m.done} of ${m.total}`, m.done, m.total);
+      p.show("Downloading your passwords…", m.done, m.total);
     }
   };
   chrome.runtime.onMessage.addListener(listener);
