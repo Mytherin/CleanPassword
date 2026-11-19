@@ -96,7 +96,8 @@ fn open_object(key: &[u8; 32], vault_id: &str, id: &str, data: &[u8]) -> Option<
 pub async fn fetch_header<T: Transport>(transport: &T, config: &S3Config, credentials: &AwsCredentials) -> Result<Option<(VaultHeader, String)>> {
     config.check()?;
     credentials.check()?;
-    let client = Client::new(config, credentials, transport);
+    let (location, creds) = (config.location(), credentials.for_client());
+    let client = Client::new(&location, &creds, transport);
     let Some(obj) = client.get(HEADER_OBJECT).await? else { return Ok(None) };
     let header: VaultHeader = serde_json::from_slice(&obj.data).map_err(|_| Error::invalid("this folder's vault.json is damaged"))?;
     header.check()?;
@@ -107,9 +108,9 @@ impl Vault {
     /// Syncs with the S3 folder. Safe to call any time; a failed sync
     /// leaves everything to be tried again next time.
     pub async fn sync<T: Transport>(&mut self, transport: &T) -> Result<SyncReport> {
-        let config = self.config.clone();
-        let credentials = self.s.credentials.clone();
-        let client = Client::new(&config, &credentials, transport);
+        let location = self.config.location();
+        let credentials = self.s.credentials.for_client();
+        let client = Client::new(&location, &credentials, transport);
         let mut report = SyncReport::default();
 
         self.sync_header(&client, &mut report).await?;
@@ -330,7 +331,7 @@ mod tests {
 
     use super::*;
     use crate::item::ItemData;
-    use crate::s3::fake::FakeS3;
+    use cleanbucket::fake::FakeS3;
     use crate::vault::tests::{config, creds, login, PW};
 
     fn join(s3: &FakeS3) -> Vault {
@@ -522,6 +523,50 @@ mod tests {
         block_on(a.sync(&s3)).unwrap();
         let b = join(&s3);
         assert_eq!(b.items().len(), 1);
+    }
+
+    /// A vault written before the S3 client and sealing moved to the shared
+    /// `cleanbucket` crate (testdata/, written by a0d74c6): the device's
+    /// saved copy unlocks, another device joins from its S3 objects, both
+    /// read the same item and passkey, and nothing is re-downloaded.
+    #[test]
+    fn opens_vaults_written_before_cleanbucket() {
+        use base64::Engine;
+        let fixture = include_str!("../testdata/vault-before-cleanbucket.txt");
+        let line = |tag: &str| fixture.lines().find_map(|l| l.strip_prefix(&format!("{tag}="))).expect("fixture line").trim().to_owned();
+        let s3 = FakeS3::new();
+        for l in fixture.lines().filter_map(|l| l.strip_prefix("OBJ=")) {
+            let mut parts = l.trim().splitn(3, '|');
+            let (key, etag, data) = (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
+            let data = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+            s3.objects.borrow_mut().insert(key.to_owned(), (data, etag.to_owned()));
+        }
+        let id = line("ITEM");
+
+        // The device that wrote it.
+        let mut a = Vault::unlock(&line("SAVED"), PW).unwrap();
+        assert_eq!(a.get(&id).unwrap().password, "fixture-password-1");
+        assert_eq!(block_on(a.sync(&s3)).unwrap(), SyncReport::default(), "nothing new");
+
+        // A new device, from S3.
+        let mut b = join(&s3);
+        let item = b.get(&id).expect("downloaded").clone();
+        assert_eq!(item.password, "fixture-password-1");
+        assert_eq!(item.passkeys.len(), 1);
+        let cred = crate::passkey::unb64(&line("CRED")).unwrap();
+        let s = b.assert_passkey(&id, &cred, "example.com", &[5; 32]).unwrap();
+        use p256::ecdsa::signature::Verifier;
+        use p256::pkcs8::DecodePublicKey;
+        let vk = p256::ecdsa::VerifyingKey::from_public_key_der(&crate::passkey::unb64(&line("PUB")).unwrap()).unwrap();
+        let mut signed = s.authenticator_data.clone();
+        signed.extend_from_slice(&[5; 32]);
+        vk.verify(&signed, &p256::ecdsa::Signature::from_der(&s.signature).unwrap()).unwrap();
+
+        // And what's written now, the old format reads (sealed alike).
+        b.update(&id, ItemData { notes: "after".into(), ..item.data() }).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        assert_eq!(a.get(&id).unwrap().notes, "after");
     }
 
     /// CleanNotes can use the same folder: its objects (head, notes/,

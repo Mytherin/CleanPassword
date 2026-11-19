@@ -11,10 +11,9 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std", "wasmbind"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
-# Encryption: Argon2id for the master password, XChaCha20-Poly1305 for
-# everything stored, zeroize for keys in memory.
+# Keys and randomness. (The vault's encryption is cleanbucket's, below; argon2
+# is also used directly for Bitwarden's password-protected exports.)
 argon2 = { version = "0.5", features = ["zeroize"] }
-chacha20poly1305 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
 getrandom = "0.2"
@@ -37,6 +36,9 @@ regex-lite = "0.1"
 csv = "1"
 # Passkeys: P-256 keys (ES256 signatures, PKCS#8 storage as Bitwarden keeps them).
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+# The S3 client, sealing and Argon2id keys CleanNotes uses too (in the
+# CleanNotes repository, bucket/), pinned to a revision.
+cleanbucket = { git = "https://github.com/Mytherin/CleanNotes", rev = "0578655b28e5142a3d1645085022cceaa2acc915" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -44,3 +46,4 @@ uuid = { version = "1", features = ["v4", "js"] }
 
 [dev-dependencies]
 pollster = "0.4"
+cleanbucket = { git = "https://github.com/Mytherin/CleanNotes", rev = "0578655b28e5142a3d1645085022cceaa2acc915", features = ["fake"] }

@@ -13,33 +13,25 @@
 //!   be swapped between items or vaults without failing to open.
 //! - Keys are wiped from memory when dropped ([`Zeroizing`]).
 
-use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use rand::rngs::OsRng;
-use rand::RngCore;
+use cleanbucket::kdf::{self, Cost};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{Error, Result};
 
-/// A 256-bit key, wiped when dropped.
-pub type Key = Zeroizing<[u8; 32]>;
+/// Sealing, random keys and padding: the ones CleanNotes uses too (the
+/// `cleanbucket` crate), byte for byte what this vault has always stored.
+pub use cleanbucket::seal::{open, pad, random_bytes, random_key, seal, Key};
 
-pub const DEFAULT_MEMORY_KIB: u32 = 46 * 1024;
-pub const DEFAULT_PASSES: u32 = 3;
-const NONCE_LEN: usize = 24;
-const TAG_LEN: usize = 16;
+pub const DEFAULT_MEMORY_KIB: u32 = Cost::DEFAULT.memory_kib;
+pub const DEFAULT_PASSES: u32 = Cost::DEFAULT.passes;
 
 /// The least a vault may ask for: below this a stolen vault would be too
 /// cheap to attack (OWASP's minimum is 19 MiB with 2 passes). Tests use
 /// tiny costs to run fast.
-const MIN_MEMORY_KIB: u32 = if cfg!(test) { 8 } else { 19 * 1024 };
-/// The most a vault may ask for, so a damaged or hostile `vault.json`
-/// can't make a device allocate gigabytes.
-const MAX_MEMORY_KIB: u32 = 1024 * 1024;
+const MIN_MEMORY_KIB: u32 = if cfg!(test) { 8 } else { kdf::MIN_MEMORY_KIB };
 
 /// How the master key is made from the master password.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,15 +59,15 @@ impl KdfParams {
         KdfParams { alg: "argon2id".into(), memory_kib, passes, lanes: 1, salt: b64(&random_bytes::<16>()) }
     }
 
-    fn check(&self) -> Result<()> {
+    fn cost(&self) -> Result<Cost> {
         if self.alg != "argon2id" {
             return Err(Error::invalid(format!("this vault uses {}, which this version of CleanPassword doesn't know", self.alg)));
         }
-        let ok = (MIN_MEMORY_KIB..=MAX_MEMORY_KIB).contains(&self.memory_kib) && (1..=32).contains(&self.passes) && (1..=16).contains(&self.lanes);
-        if !ok {
-            return Err(Error::invalid("the vault's key derivation settings are out of the allowed range"));
-        }
-        Ok(())
+        // A damaged or hostile vault.json can't make a device allocate
+        // gigabytes, nor make a stolen vault cheap to attack.
+        let cost = Cost { memory_kib: self.memory_kib, passes: self.passes, lanes: self.lanes };
+        cost.check(MIN_MEMORY_KIB).map_err(|_| Error::invalid("the vault's key derivation settings are out of the allowed range"))?;
+        Ok(cost)
     }
 }
 
@@ -85,61 +77,14 @@ impl Default for KdfParams {
     }
 }
 
-/// The master key for `password`.
+/// The master key for `password` (Argon2id).
 pub fn derive_key(password: &str, p: &KdfParams) -> Result<Key> {
-    p.check()?;
+    let cost = p.cost()?;
     let salt = unb64(&p.salt)?;
     if salt.len() < 16 {
         return Err(Error::invalid("the vault's salt is too short"));
     }
-    let params = Params::new(p.memory_kib, p.passes, p.lanes, Some(32)).map_err(|e| Error::invalid(format!("argon2: {e}")))?;
-    let mut key = Zeroizing::new([0u8; 32]);
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(password.as_bytes(), &salt, key.as_mut())
-        .map_err(|e| Error::invalid(format!("argon2: {e}")))?;
-    Ok(key)
-}
-
-pub fn random_bytes<const N: usize>() -> [u8; N] {
-    let mut b = [0u8; N];
-    OsRng.fill_bytes(&mut b);
-    b
-}
-
-pub fn random_key() -> Key {
-    let mut key = Zeroizing::new([0u8; 32]);
-    OsRng.fill_bytes(key.as_mut());
-    key
-}
-
-/// `nonce ‖ ciphertext ‖ tag` of `plain`, bound to `aad`.
-pub fn seal(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Vec<u8> {
-    let nonce = random_bytes::<NONCE_LEN>();
-    let ct = XChaCha20Poly1305::new(key.into())
-        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad })
-        .expect("XChaCha20-Poly1305 encryption can't fail");
-    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
-    out.extend_from_slice(&nonce);
-    out.extend(ct);
-    out
-}
-
-/// The plaintext of [`seal`]'s output, or `None` if it wasn't sealed with
-/// this key and `aad`, or was changed.
-pub fn open(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-    if sealed.len() < NONCE_LEN + TAG_LEN {
-        return None;
-    }
-    let (nonce, ct) = sealed.split_at(NONCE_LEN);
-    XChaCha20Poly1305::new(key.into()).decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad }).ok().map(Zeroizing::new)
-}
-
-/// Pads `data` with spaces (JSON ignores them) to a multiple of `block`
-/// bytes, so stored sizes don't give away how long passwords and notes are.
-pub fn pad(mut data: Vec<u8>, block: usize) -> Vec<u8> {
-    let len = data.len().div_ceil(block).max(1) * block;
-    data.resize(len, b' ');
-    data
+    Ok(kdf::derive(password.as_bytes(), &salt, cost)?)
 }
 
 pub fn b64(data: &[u8]) -> String {

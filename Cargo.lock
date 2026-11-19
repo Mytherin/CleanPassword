@@ -335,6 +335,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
+name = "cleanbucket"
+version = "0.1.0"
+source = "git+https://github.com/Mytherin/CleanNotes?rev=0578655b28e5142a3d1645085022cceaa2acc915#0578655b28e5142a3d1645085022cceaa2acc915"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "chrono",
+ "getrandom 0.2.17",
+ "hmac",
+ "rand",
+ "sha2",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "cleanpassword-core"
 version = "0.1.0"
 dependencies = [
@@ -342,8 +358,8 @@ dependencies = [
  "argon2",
  "base64 0.22.1",
  "cbc",
- "chacha20poly1305",
  "chrono",
+ "cleanbucket",
  "csv",
  "getrandom 0.2.17",
  "hkdf",
