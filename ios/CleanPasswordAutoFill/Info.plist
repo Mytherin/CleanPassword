@@ -32,6 +32,10 @@
 				<true/>
 				<key>ProvidesPasskeys</key>
 				<true/>
+				<key>ProvidesOneTimeCodes</key>
+				<true/>
+				<key>ProvidesTextToInsert</key>
+				<true/>
 			</dict>
 			<key>ASCredentialProviderExtensionShowsConfigurationUI</key>
 			<true/>

@@ -63,7 +63,10 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 - **Auto-lock** after time in the background.
 - **The AutoFill extension** works from the keyboard, the QuickType suggestions, and Safari and apps, for passwords and **passkeys** (iOS 17’s passkey provider). It unlocks with Face ID or the master password.
   - **New passkeys:** “Save a passkey for …?” saves the passkey on the site’s login, or a new one, and syncs it at once.
-  - **The suggestions above the keyboard** register only user names, websites and passkey ids with iOS, never passwords or keys.
+  - **Verification codes (iOS 18):** in a site's code field, the codes of its logins are offered above the keyboard and in the extension.
+  - **Any field (iOS 18):** AutoFill → Passwords in a field's text menu lets you pick an item, then any of its values (user name, password, code, website, custom fields, notes) to type in.
+  - **Passkeys a site already has:** when a site lists the account's existing passkeys and one is in CleanPassword, no second one is made.
+  - **The suggestions above the keyboard** register only user names, websites, passkey ids and which logins have codes with iOS, never passwords, keys or code secrets.
   - **Turning it on:** in Settings → General → AutoFill & Passwords, turn on CleanPassword.
 - **Copied passwords** stay on this device (no Universal Clipboard) and are cleared after 90 seconds.
 

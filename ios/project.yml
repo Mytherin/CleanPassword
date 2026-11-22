@@ -65,7 +65,8 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
   # The AutoFill credential provider: "CleanPassword" in Settings → General →
-  # AutoFill & Passwords, then above the keyboard and in Safari's sign-in.
+  # AutoFill & Passwords, then above the keyboard, in Safari's sign-in, in
+  # verification-code fields, and in any field's AutoFill → Passwords menu.
   CleanPasswordAutoFill:
     type: app-extension
     platform: iOS
@@ -90,6 +91,9 @@ targets:
             ASCredentialProviderExtensionCapabilities:
               ProvidesPasswords: true
               ProvidesPasskeys: true
+              # iOS 18: verification codes, and any field's AutoFill → Passwords menu.
+              ProvidesOneTimeCodes: true
+              ProvidesTextToInsert: true
     entitlements:
       path: CleanPasswordAutoFill/CleanPasswordAutoFill.entitlements
       properties:

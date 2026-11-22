@@ -3,10 +3,12 @@ import SwiftUI
 
 /// The AutoFill extension: what iOS opens from the keyboard's "Passwords"
 /// button, the suggestions above it, and Safari's and apps' sign-in sheets,
-/// for passwords and passkeys. It unlocks the vault this device keeps
-/// (Face ID, or the master password), offers the logins and passkeys for
-/// the site, and hands the chosen one to iOS; and it saves new passkeys
-/// sites make, syncing them at once so the app and other devices get them.
+/// for passwords, passkeys and verification codes; and, from the "AutoFill
+/// → Passwords" text menu in any field, any value of an item. It unlocks
+/// the vault this device keeps (Face ID, or the master password), offers
+/// what fits the site, and hands the chosen one to iOS; and it saves new
+/// passkeys sites make, syncing them at once so the app and other devices
+/// get them.
 final class CredentialProviderViewController: ASCredentialProviderViewController {
     private let model = ExtensionModel()
 
@@ -35,15 +37,36 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         model.mode = .list
     }
 
+    /// A verification-code field (iOS 18): the logins for the site that
+    /// have a TOTP secret.
+    @available(iOS 18.0, *)
+    override func prepareOneTimeCodeCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
+        model.services = serviceIdentifiers.map(\.identifier)
+        model.mode = .codes
+    }
+
+    /// "AutoFill → Passwords" from a field's text menu (iOS 18): any value
+    /// of any item, typed into the field.
+    @available(iOS 18.0, *)
+    override func prepareInterfaceForUserChoosingTextToInsert() {
+        model.mode = .text
+    }
+
     /// A suggestion above the keyboard was picked. The vault is locked
     /// whenever the extension starts, so this always needs the user (Face ID).
     override func provideCredentialWithoutUserInteraction(for credentialRequest: any ASCredentialRequest) {
         extensionContext.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: ASExtensionError.userInteractionRequired.rawValue))
     }
 
-    /// …so iOS shows the extension for it: unlock, then hand over that login
-    /// or passkey.
+    /// …so iOS shows the extension for it: unlock, then hand over that login,
+    /// passkey or code.
     override func prepareInterfaceToProvideCredential(for credentialRequest: any ASCredentialRequest) {
+        if #available(iOS 18.0, *), let identity = credentialRequest.credentialIdentity as? ASOneTimeCodeCredentialIdentity {
+            model.wantedCode = identity.recordIdentifier
+            model.services = [identity.serviceIdentifier.identifier]
+            model.mode = .codes
+            return
+        }
         if let p = credentialRequest as? ASPasskeyCredentialRequest, let identity = p.credentialIdentity as? ASPasskeyCredentialIdentity {
             model.passkeyRequest = ExtensionModel.PasskeyRequest(rpId: identity.relyingPartyIdentifier, clientDataHash: p.clientDataHash, allowed: [identity.credentialID])
             model.wantedPasskey = (identity.recordIdentifier ?? "", identity.credentialID)
@@ -65,6 +88,11 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         }
         model.registration = ExtensionModel.Registration(
             rpId: identity.relyingPartyIdentifier, userName: identity.userName, userHandle: identity.userHandle, clientDataHash: p.clientDataHash)
+        // The account's passkeys the site already knows (iOS 18): if one of
+        // them is here, the site has its passkey and none is made.
+        if #available(iOS 18.0, *), let excluded = p.excludedCredentials {
+            model.excluded = excluded.map(\.credentialID)
+        }
         model.services = [identity.relyingPartyIdentifier]
         model.mode = .register
     }
@@ -77,7 +105,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
 
 @MainActor
 final class ExtensionModel: ObservableObject {
-    enum Mode { case list, register, configured }
+    enum Mode { case list, codes, text, register, configured }
 
     struct PasskeyRequest {
         var rpId: String
@@ -92,6 +120,14 @@ final class ExtensionModel: ObservableObject {
         var clientDataHash: Data
     }
 
+    /// One value of an item that can be typed into a field.
+    struct Value: Identifiable {
+        var label: String
+        var text: String
+        var hidden: Bool
+        var id: String { label }
+    }
+
     @Published var mode: Mode = .list
     @Published var unlocked = false
     @Published var matches: [SuggestedLogin] = []
@@ -101,9 +137,11 @@ final class ExtensionModel: ObservableObject {
     @Published var busy = false
     var services: [String] = []
     var wanted: String?
+    var wantedCode: String?
     var wantedPasskey: (item: String, credential: Data)?
     var passkeyRequest: PasskeyRequest?
     var registration: Registration?
+    var excluded: [Data] = []
     var context: () -> ASCredentialProviderExtensionContext? = { nil }
     private var session: VaultSession?
 
@@ -115,7 +153,11 @@ final class ExtensionModel: ObservableObject {
     }
 
     func cancel() {
-        context()?.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: ASExtensionError.userCanceled.rawValue))
+        fail(.userCanceled)
+    }
+
+    private func fail(_ code: ASExtensionError.Code) {
+        context()?.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: code.rawValue))
     }
 
     /// Ends the screen shown when AutoFill is turned on in Settings.
@@ -145,18 +187,34 @@ final class ExtensionModel: ObservableObject {
     private func opened(_ s: VaultSession) async {
         session = s
         unlocked = true
-        if let w = wantedPasskey {
-            return await usePasskey(item: w.item, credential: w.credential)
-        }
-        if let id = wanted, let item = s.get(id: id) {
-            return complete(user: item.fields.username, password: item.fields.password)
-        }
-        if let r = passkeyRequest {
-            passkeys = s.passkeysFor(rpId: r.rpId, allowed: r.allowed)
-        }
         var seen = Set<String>()
-        matches = services.flatMap { s.matches(url: $0) }.filter { seen.insert($0.id).inserted }
-        all = s.items().filter { $0.fields.kind == .login }
+        let siteMatches = services.flatMap { s.matches(url: $0) }.filter { seen.insert($0.id).inserted }
+        switch mode {
+        case .codes:
+            if let id = wantedCode { return pickCode(id) }
+            let withCode = Set(s.items().filter { !$0.fields.totp.isEmpty }.map(\.id))
+            matches = siteMatches.filter { withCode.contains($0.id) }
+            all = s.items().filter { withCode.contains($0.id) }
+        case .text:
+            all = s.items()
+        case .register:
+            if let r = registration, !excluded.isEmpty, s.passkeyExcluded(rpId: r.rpId, excluded: excluded) {
+                if #available(iOS 18.0, *) { return fail(.matchedExcludedCredential) }
+                error = "You already have a passkey for this account on \(r.rpId)."
+            }
+        case .list, .configured:
+            if let w = wantedPasskey {
+                return await usePasskey(item: w.item, credential: w.credential)
+            }
+            if let id = wanted, let item = s.get(id: id) {
+                return complete(user: item.fields.username, password: item.fields.password)
+            }
+            if let r = passkeyRequest {
+                passkeys = s.passkeysFor(rpId: r.rpId, allowed: r.allowed)
+            }
+            matches = siteMatches
+            all = s.items().filter { $0.fields.kind == .login }
+        }
     }
 
     func pick(_ id: String) {
@@ -166,6 +224,41 @@ final class ExtensionModel: ObservableObject {
 
     private func complete(user: String, password: String) {
         context()?.completeRequest(withSelectedCredential: ASPasswordCredential(user: user, password: password), completionHandler: nil)
+    }
+
+    /// Fills the login's current verification code.
+    func pickCode(_ id: String) {
+        guard #available(iOS 18.0, *) else { return }
+        guard let code = session?.totp(id: id) else {
+            error = "This login's verification code setup isn't valid. Fix it in the CleanPassword app."
+            return
+        }
+        context()?.completeOneTimeCodeRequest(using: ASOneTimeCodeCredential(code: code.code), completionHandler: nil)
+    }
+
+    /// The values of an item that can be typed into a field, in the order
+    /// the app shows them.
+    func values(of item: VaultItem) -> [Value] {
+        let f = item.fields
+        var out: [Value] = []
+        func add(_ label: String, _ text: String, hidden: Bool = false) {
+            if !text.isEmpty { out.append(Value(label: label, text: text, hidden: hidden)) }
+        }
+        add("User Name", f.username)
+        add("Password", f.password, hidden: true)
+        if !f.totp.isEmpty, let code = session?.totp(id: item.id) { add("Verification Code", code.code) }
+        for (n, site) in f.websites.enumerated() { add(n == 0 ? "Website" : "Website \(n + 1)", site.uri) }
+        for field in f.fields { add(field.name.isEmpty ? "Field" : field.name, field.value, hidden: field.hidden) }
+        add("Notes", f.notes)
+        // Labels are the rows' ids: keep the first of any repeated name.
+        var seen = Set<String>()
+        return out.filter { seen.insert($0.label).inserted }
+    }
+
+    /// Types the text into the field the menu was opened from.
+    func insert(_ text: String) {
+        guard #available(iOS 18.0, *) else { return }
+        context()?.completeRequest(withTextToInsert: text, completionHandler: nil)
     }
 
     /// Saves the vault, and syncs it so a change made here (a new passkey,
@@ -227,7 +320,7 @@ struct ExtensionView: View {
                     ContentUnavailableView {
                         Label("CleanPassword Is On", systemImage: "checkmark.circle")
                     } description: {
-                        Text("Your passwords and passkeys will be offered when you sign in. Set up the vault in the CleanPassword app if you haven't yet.")
+                        Text("Your passwords, passkeys and verification codes will be offered when you sign in. Set up the vault in the CleanPassword app if you haven't yet.")
                     } actions: {
                         Button("Done") { model.finishConfiguration() }.buttonStyle(.borderedProminent)
                     }
@@ -235,10 +328,13 @@ struct ExtensionView: View {
                     ContentUnavailableView("No Vault Yet", systemImage: "key", description: Text("Open the CleanPassword app to set up your vault."))
                 } else if !model.unlocked {
                     unlockForm
-                } else if model.mode == .register {
-                    registerForm
                 } else {
-                    list
+                    switch model.mode {
+                    case .register: registerForm
+                    case .codes: codeList
+                    case .text: textList
+                    case .list, .configured: list
+                    }
                 }
             }
             .toolbar {
@@ -248,10 +344,24 @@ struct ExtensionView: View {
         .task { await model.tryBiometrics() }
     }
 
+    private var unlockTitle: String {
+        switch model.mode {
+        case .codes where !model.site.isEmpty: return "Unlock to get a code for \(model.site)"
+        case .text: return "Unlock CleanPassword"
+        default: return model.site.isEmpty ? "Unlock CleanPassword" : "Unlock to sign in to \(model.site)"
+        }
+    }
+
+    private var unlockIcon: String {
+        if model.mode == .register || model.wantedPasskey != nil { return "person.badge.key.fill" }
+        if model.mode == .codes { return "clock.badge.checkmark" }
+        return "lock.fill"
+    }
+
     private var unlockForm: some View {
         VStack(spacing: 16) {
-            Image(systemName: model.mode == .register || model.wantedPasskey != nil ? "person.badge.key.fill" : "lock.fill").font(.largeTitle).foregroundStyle(.tint)
-            Text(model.site.isEmpty ? "Unlock CleanPassword" : "Unlock to sign in to \(model.site)").font(.headline).multilineTextAlignment(.center)
+            Image(systemName: unlockIcon).font(.largeTitle).foregroundStyle(.tint)
+            Text(unlockTitle).font(.headline).multilineTextAlignment(.center)
             SecureField("Master password", text: $password)
                 .textContentType(.password)
                 .padding(12)
@@ -354,6 +464,76 @@ struct ExtensionView: View {
         }
         .searchable(text: $query)
         .navigationTitle("Passwords")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// Verification codes: the site's logins with one first, then all.
+    private var codeList: some View {
+        List {
+            if query.isEmpty && !model.matches.isEmpty {
+                Section("Codes for \(model.site)") {
+                    ForEach(model.matches) { m in
+                        row(name: m.name, user: m.username, note: m.related ? "Shared sign-in" : nil) { model.pickCode(m.id) }
+                    }
+                }
+            }
+            Section(query.isEmpty ? "All Codes" : "Results") {
+                ForEach(filtered) { i in
+                    row(name: i.fields.name, user: i.fields.username, note: nil) { model.pickCode(i.id) }
+                }
+            }
+            if model.all.isEmpty {
+                Text("None of your logins has a verification code. Add its setup key in the CleanPassword app.").foregroundStyle(.secondary)
+            }
+            if let e = model.error { Section { Text(e).foregroundStyle(.red) } }
+        }
+        .searchable(text: $query)
+        .navigationTitle("Verification Codes")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// Any item, then the value of it to type into the field.
+    private var textList: some View {
+        List {
+            Section(query.isEmpty ? "All Items" : "Results") {
+                ForEach(filtered) { i in
+                    NavigationLink {
+                        valueList(i)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(i.fields.name).foregroundStyle(.primary)
+                            if !i.fields.username.isEmpty {
+                                Text(i.fields.username).font(.subheadline).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .searchable(text: $query)
+        .navigationTitle("Insert From CleanPassword")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func valueList(_ item: VaultItem) -> some View {
+        List {
+            let values = model.values(of: item)
+            if values.isEmpty {
+                Text("This item has nothing to insert.").foregroundStyle(.secondary)
+            }
+            ForEach(values) { v in
+                Button {
+                    model.insert(v.text)
+                } label: {
+                    VStack(alignment: .leading) {
+                        Text(v.label).font(.subheadline).foregroundStyle(.secondary)
+                        Text(v.hidden ? String(repeating: "•", count: min(v.text.count, 12)) : v.text)
+                            .foregroundStyle(.primary).lineLimit(3)
+                    }
+                }
+            }
+        }
+        .navigationTitle(item.fields.name)
         .navigationBarTitleDisplayMode(.inline)
     }
 
