@@ -16,6 +16,7 @@ struct ItemDetailView: View {
     @State private var revealedOld: Set<Int> = []
     @State private var failure: String?
     @State private var editing = false
+    @State private var scanning = false
     @State private var confirmDelete = false
     @State private var copied: String?
     @State private var deletingPasskey: PasskeyInfo?
@@ -48,6 +49,13 @@ struct ItemDetailView: View {
                     if !f.username.isEmpty { copyRow("User Name", f.username, key: "user") }
                     if !f.password.isEmpty { passwordRow(f.password) }
                     if !f.totp.isEmpty { TotpRow(secret: f.totp) }
+                }
+                if f.totp.isEmpty {
+                    Section {
+                        Button { scanning = true } label: { Label("Set Up Verification Code…", systemImage: "qrcode.viewfinder") }
+                    } footer: {
+                        Text("Scan the QR code the site shows when you turn on two-factor authentication, and CleanPassword fills in its codes.")
+                    }
                 }
                 if !f.websites.isEmpty {
                     Section("Websites") {
@@ -126,6 +134,21 @@ struct ItemDetailView: View {
         .sheet(isPresented: $editing) {
             NavigationStack { ItemEditView(item: item) }
         }
+        .sheet(isPresented: $scanning) {
+            CodeScannerView { code in
+                Task {
+                    do {
+                        try await store.change { s in
+                            guard var fields = s.get(id: item.id)?.fields else { return }
+                            fields.totp = code
+                            _ = try s.update(id: item.id, fields: fields)
+                        }
+                    } catch {
+                        failure = message(error)
+                    }
+                }
+            }
+        }
         .confirmationDialog("Delete this passkey?", isPresented: Binding(get: { deletingPasskey != nil }, set: { if !$0 { deletingPasskey = nil } }), titleVisibility: .visible) {
             Button("Delete Passkey", role: .destructive) {
                 if let p = deletingPasskey {
@@ -152,7 +175,7 @@ struct ItemDetailView: View {
         } message: {
             Text("You can recover it from Deleted for 30 days.")
         }
-        .alert("Couldn't Delete", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+        .alert("CleanPassword", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK") { failure = nil }
         } message: {
             Text(failure ?? "")

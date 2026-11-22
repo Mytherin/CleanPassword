@@ -32,6 +32,7 @@ struct ItemEditView: View {
     }
 
     @State private var showPassword = false
+    @State private var scanning = false
     @State private var error: String?
     @State private var busy = false
     @AppStorage("recipe") private var recipeData = Data()
@@ -101,7 +102,11 @@ struct ItemEditView: View {
                     }
                 }
                 Section {
-                    TextField("otpauth://… or the setup key", text: $f.totp).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    HStack {
+                        TextField("otpauth://… or the setup key", text: $f.totp).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Button { scanning = true } label: { Image(systemName: "qrcode.viewfinder") }.buttonStyle(.borderless)
+                            .accessibilityLabel("Scan QR Code")
+                    }
                 } header: {
                     Text("Verification Code")
                 } footer: {
@@ -146,6 +151,15 @@ struct ItemEditView: View {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") { Task { await save() } }.disabled(busy || !canSave)
+            }
+        }
+        .sheet(isPresented: $scanning) {
+            CodeScannerView { code in
+                f.totp = code
+                // A new login takes its name and user name from the code.
+                let label = CodeScannerView.label(of: code)
+                if f.name.trimmingCharacters(in: .whitespaces).isEmpty, let issuer = label.issuer { f.name = issuer }
+                if f.username.isEmpty, let account = label.account { f.username = account }
             }
         }
         .onAppear { keepDraft() }

@@ -104,4 +104,19 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(r.added, 1)
         XCTAssertEqual(s.matches(url: "github.com").first?.username, "octo")
     }
+
+    /// A scanned setup QR code names the site and account for a new login.
+    func testOtpauthLabel() {
+        let a = CodeScannerView.label(of: "otpauth://totp/GitHub:octo%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub")
+        XCTAssertEqual(a.issuer, "GitHub")
+        XCTAssertEqual(a.account, "octo@example.com")
+        let b = CodeScannerView.label(of: "otpauth://totp/Example%20Co:me?secret=JBSWY3DPEHPK3PXP")
+        XCTAssertEqual(b.issuer, "Example Co")
+        XCTAssertEqual(b.account, "me")
+        let c = CodeScannerView.label(of: "otpauth://totp/me?secret=JBSWY3DPEHPK3PXP")
+        XCTAssertNil(c.issuer)
+        XCTAssertEqual(c.account, "me")
+        XCTAssertNil(CodeScannerView.label(of: "JBSWY3DPEHPK3PXP").account)
+        XCTAssertTrue(isValidTotp(secret: "otpauth://totp/GitHub:octo?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"))
+    }
 }
