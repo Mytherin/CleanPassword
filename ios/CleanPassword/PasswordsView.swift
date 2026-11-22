@@ -66,6 +66,7 @@ struct PasswordsView: View {
                     tile(.codes, count: store.items.filter { !$0.fields.totp.isEmpty }.count)
                     tile(.security, count: store.findings.count)
                     tile(.deleted, count: store.trash.count)
+                    tile(.favorites, count: store.items.filter { $0.fields.favorite }.count)
                 }
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
@@ -119,11 +120,7 @@ struct PasswordsView: View {
 
     /// Search results: every item with all the words typed.
     private var results: some View {
-        let words = search.lowercased().split(separator: " ")
-        let found = store.items.filter { i in
-            let hay = ([i.fields.name, i.fields.username, i.fields.folder, i.fields.notes] + i.fields.websites.map(\.uri)).joined(separator: "\n").lowercased()
-            return words.allSatisfy { hay.contains($0) }
-        }
+        let found = SortOrder.title.sorted(store.items.filter { $0.matches(search: search) })
         return List(found) { i in
             NavigationLink(value: Route.item(id: i.id)) { ItemRow(item: i) }
                 .contextMenu { ItemMenu(item: i) }

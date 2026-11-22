@@ -6,41 +6,93 @@ import SwiftUI
 struct ItemListView: View {
     @EnvironmentObject private var store: VaultStore
     let category: Category
+    @State private var search = ""
+    @AppStorage("sortOrder") private var sort = SortOrder.title
 
     var body: some View {
         Group {
             switch category {
-            case .all: lettered(store.items)
-            case .folder(let f): lettered(store.items.filter { $0.fields.folder == f })
-            case .passkeys: lettered(store.items.filter { !$0.passkeys.isEmpty })
-            case .codes: CodesList()
+            case .all: sorted(store.items)
+            case .folder(let f): sorted(store.items.filter { $0.fields.folder == f })
+            case .passkeys: sorted(store.items.filter { !$0.passkeys.isEmpty })
+            case .favorites: sorted(store.items.filter(\.fields.favorite))
+            case .codes: CodesList(search: search)
             case .security: SecurityList()
             case .deleted: DeletedList()
             }
         }
         .navigationTitle(category.title)
+        .modifier(Searchable(on: category != .security && category != .deleted, text: $search))
+        .toolbar {
+            if category.sortable {
+                Menu {
+                    Picker("Sort By", selection: $sort) {
+                        ForEach(SortOrder.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+                .accessibilityLabel("Sort By")
+            }
+        }
     }
 
-    /// Items in sections by their first letter.
-    private func lettered(_ items: [VaultItem]) -> some View {
-        let sections = Dictionary(grouping: items) { i -> String in
-            let first = i.fields.name.trimmingCharacters(in: .whitespaces).prefix(1).uppercased()
-            return first.first?.isLetter == true ? first : "#"
-        }
-        let keys = sections.keys.sorted { a, b in a == "#" ? false : b == "#" ? true : a < b }
-        return List {
-            ForEach(keys, id: \.self) { k in
-                Section(k) {
-                    ForEach(sections[k] ?? []) { i in
-                        NavigationLink(value: Route.item(id: i.id)) { ItemRow(item: i) }
-                            .contextMenu { ItemMenu(item: i) }
+    /// The items found, in the chosen order: by title in letter sections,
+    /// else in one list.
+    @ViewBuilder
+    private func sorted(_ all: [VaultItem]) -> some View {
+        let items = sort.sorted(all.filter { $0.matches(search: search) })
+        List {
+            if sort == .title && search.isEmpty {
+                let sections = Dictionary(grouping: items) { i -> String in
+                    let first = i.fields.name.trimmingCharacters(in: .whitespaces).prefix(1).uppercased()
+                    return first.first?.isLetter == true ? first : "#"
+                }
+                let keys = sections.keys.sorted { a, b in a == "#" ? false : b == "#" ? true : a < b }
+                ForEach(keys, id: \.self) { k in
+                    Section(k) {
+                        ForEach(sections[k] ?? []) { row($0) }
                     }
                 }
+            } else {
+                ForEach(items) { row($0) }
             }
         }
         .overlay {
-            if items.isEmpty { ContentUnavailableView("No Passwords", systemImage: "key") }
+            if items.isEmpty {
+                if !search.isEmpty {
+                    ContentUnavailableView.search(text: search)
+                } else if category == .favorites {
+                    ContentUnavailableView("No Favorites", systemImage: "star", description: Text("Touch and hold a password and choose Add to Favorites."))
+                } else {
+                    ContentUnavailableView("No Passwords", systemImage: "key")
+                }
+            }
         }
+    }
+
+    private func row(_ i: VaultItem) -> some View {
+        NavigationLink(value: Route.item(id: i.id)) { ItemRow(item: i) }
+            .contextMenu { ItemMenu(item: i) }
+    }
+}
+
+private extension Category {
+    var sortable: Bool {
+        switch self {
+        case .all, .folder, .passkeys, .favorites: return true
+        case .codes, .security, .deleted: return false
+        }
+    }
+}
+
+/// A search field, on lists that have one.
+private struct Searchable: ViewModifier {
+    let on: Bool
+    @Binding var text: String
+
+    func body(content: Content) -> some View {
+        if on { content.searchable(text: $text) } else { content }
     }
 }
 
@@ -48,15 +100,22 @@ struct ItemListView: View {
 /// copies it.
 private struct CodesList: View {
     @EnvironmentObject private var store: VaultStore
+    let search: String
     @State private var copied: String?
 
     var body: some View {
-        let items = store.items.filter { !$0.fields.totp.isEmpty }
+        let items = SortOrder.title.sorted(store.items.filter { !$0.fields.totp.isEmpty && $0.matches(search: search) })
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             List(items) { i in
                 let code = try? oneTimeCode(secret: i.fields.totp)
                 Button {
-                    if let code { copySecret(code.code); copied = i.id }
+                    guard let code else { return }
+                    copySecret(code.code)
+                    copied = i.id
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        if copied == i.id { copied = nil }
+                    }
                 } label: {
                     HStack(spacing: 12) {
                         Monogram(name: i.fields.name)
@@ -77,8 +136,10 @@ private struct CodesList: View {
             }
         }
         .overlay {
-            if items.isEmpty {
-                ContentUnavailableView("No Codes", systemImage: "lock.rotation", description: Text("Add a setup key to a password to keep its verification codes here."))
+            if items.isEmpty && !search.isEmpty {
+                ContentUnavailableView.search(text: search)
+            } else if items.isEmpty {
+                ContentUnavailableView("No Codes", systemImage: "lock.rotation", description: Text("Open a password and tap Set Up Verification Code to scan the site's QR code."))
             }
         }
     }
@@ -197,5 +258,30 @@ private struct DeletedList: View {
                 purging = nil
             }
         }
+        .toolbar {
+            if !store.trash.isEmpty {
+                Menu {
+                    Button { recoverAll() } label: { Label("Recover All", systemImage: "arrow.uturn.backward") }
+                    Button(role: .destructive) { confirmDeleteAll = true } label: { Label("Delete All", systemImage: "trash") }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
+        .confirmationDialog("Delete all \(store.trash.count) items for good, on every device?", isPresented: $confirmDeleteAll, titleVisibility: .visible) {
+            Button("Delete All", role: .destructive) {
+                let ids = store.trash.map(\.id)
+                Task { try? await store.change { s in for id in ids { try s.purge(id: id) } } }
+            }
+        } message: {
+            Text("They can't be recovered.")
+        }
+    }
+
+    @State private var confirmDeleteAll = false
+
+    private func recoverAll() {
+        let ids = store.trash.map(\.id)
+        Task { try? await store.change { s in for id in ids { try s.restore(id: id) } } }
     }
 }
