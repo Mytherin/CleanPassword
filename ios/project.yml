@@ -27,6 +27,7 @@ targets:
         - CleanPasswordTests
     sources:
       - path: CleanPassword
+        excludes: [Info.plist]
       - path: Shared
       - path: Generated/cleanpassword_ffi.swift
         optional: true
@@ -56,6 +57,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.cleanpassword.app
         PRODUCT_NAME: CleanPassword
         GENERATE_INFOPLIST_FILE: YES
+        # What the generated keys go into: the otpauth:// URL scheme (a
+        # verification-code QR code scanned with the Camera app opens the
+        # app to set it up on a login).
+        INFOPLIST_FILE: CleanPassword/Info.plist
         INFOPLIST_KEY_CFBundleDisplayName: CleanPassword
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES

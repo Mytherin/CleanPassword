@@ -107,6 +107,24 @@ final class VaultStore: ObservableObject {
     /// That editor, to open again now that the vault is unlocked.
     @Published var reopenDraft: Draft?
 
+    /// An `otpauth://` link opened in the app, to set up on a login (once
+    /// unlocked).
+    struct CodeLink: Identifiable {
+        let id = UUID()
+        let link: String
+    }
+    @Published var codeLink: CodeLink?
+
+    func open(url: URL) {
+        let text = url.absoluteString
+        guard url.scheme?.lowercased() == "otpauth" else { return }
+        guard isValidTotp(secret: text) else {
+            notice = "That verification code link isn't valid."
+            return
+        }
+        codeLink = CodeLink(link: text)
+    }
+
     /// Whether the unlock screen starts Face ID by itself. Not right after
     /// Lock Now: the user is looking at the phone, so it would unlock again.
     private(set) var offerBiometrics = true

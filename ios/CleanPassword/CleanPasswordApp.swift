@@ -9,6 +9,8 @@ struct CleanPasswordApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(store)
+                // otpauth:// links: verification codes to set up.
+                .onOpenURL { store.open(url: $0) }
         }
         .onChange(of: phase) { _, phase in
             switch phase {

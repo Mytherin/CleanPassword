@@ -45,6 +45,9 @@ struct PasswordsView: View {
         .sheet(isPresented: $newItem) {
             NavigationStack { ItemEditView(item: nil) }
         }
+        .sheet(item: $store.codeLink) { c in
+            NavigationStack { SetUpCodeView(link: c.link) }
+        }
         // The editor that was open when the vault locked, with its work.
         .sheet(item: $store.reopenDraft) { d in
             NavigationStack { ItemEditView(item: store.items.first { $0.id == d.itemId }, draft: d) }
