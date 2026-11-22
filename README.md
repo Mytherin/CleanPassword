@@ -52,17 +52,21 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 
 ### iPhone app
 
-- **The Passwords screen, as in Apple's Passwords app:** tiles for **All**, **Passkeys**, **Codes**, **Security** and **Deleted** with their counts, your folders below them, and search across everything. The "…" menu has Settings, the generator and Lock Now; the bottom toolbar shows the sync status and New Password.
-  - **All and folders** list items by name in letter sections. Touch and hold an item to copy its user name, password or code, or to delete it.
+- **The Passwords screen, as in Apple's Passwords app:** tiles for **All**, **Passkeys**, **Codes**, **Security**, **Deleted** and **Favorites** with their counts, your folders below them, and search across everything (fields included). The "…" menu has Settings, the generator and Lock Now; the bottom toolbar shows the sync status and New Password.
+  - **All, Passkeys, Favorites and folders** sort by title (in letter sections), website, date created or date edited, and have their own search. Touch and hold an item to copy its user name, password or code, add it to Favorites, or delete it.
   - **Codes** shows each item's current verification code with a countdown ring; tap one to copy it.
   - **Security** offers to merge duplicate logins, then lists reused passwords, then weak ones.
-  - **Deleted** keeps items 30 days; swipe to recover or delete for good.
-- **An item** shows its icon, name and modified date on top, then user name, password (dots until tapped), verification code, websites, fields, notes and earlier passwords, each with a copy button. Edit opens the editor, with the generator and a strength meter.
+  - **Deleted** keeps items 30 days; swipe to recover or delete for good, or Recover All / Delete All.
+- **An item** shows its icon, name and modified date on top, then user name, password (dots until tapped), verification code, websites, fields, notes and earlier passwords, each with a copy button; hidden fields and earlier passwords show on their own tap. Edit opens the editor, with the generator (following the site's password rules), a strength meter, custom fields and each website's matching.
+  - **Unsaved edits survive locking:** if the vault locks while the editor is open (say, while you copy a setup key from another app), the editor opens again with your changes after unlocking. Saving applies only what you changed, so edits synced from another device meanwhile are kept.
+- **Verification codes, set up as in Apple's Passwords:** “Set Up Verification Code…” on a login (or the scan button in the editor) scans the site's QR code with the camera, or reads it from a screenshot. A code QR scanned with the Camera app, or an `otpauth://` link, opens CleanPassword to choose the login to put it on, or a new one.
 - The Chrome popup has the same tiles, under the logins for the current site.
 - **Face ID unlock.** It's optional, uses a keychain item readable only after biometric authentication, and is forgotten when the enrolled faces change.
 - **Auto-lock** after time in the background.
 - **The AutoFill extension** works from the keyboard, the QuickType suggestions, and Safari and apps, for passwords and **passkeys** (iOS 17’s passkey provider). It unlocks with Face ID or the master password.
-  - **New passkeys:** “Save a passkey for …?” saves the passkey on the site’s login, or a new one, and syncs it at once.
+  - **New passkeys:** “Save a passkey for …?” saves the passkey on the site’s login, or a new one, and syncs it at once (waiting at most a few seconds, so the site isn't kept waiting; the app finishes an unfinished sync). A passkey is handed to the site only once it's saved.
+  - **Signing up:** “New Password for …” makes a strong password following the site's rules, saves it with the user name you type, and fills it in. (iOS keeps its own automatic “Use Strong Password” offer for iCloud Keychain.)
+  - **The app and the extension never overwrite each other:** each merges what the other saved (as a sync merges devices) before writing the vault they share.
   - **Verification codes (iOS 18):** in a site's code field, the codes of its logins are offered above the keyboard and in the extension.
   - **Any field (iOS 18):** AutoFill → Passwords in a field's text menu lets you pick an item, then any of its values (user name, password, code, website, custom fields, notes) to type in.
   - **Passkeys a site already has:** when a site lists the account's existing passkeys and one is in CleanPassword, no second one is made.

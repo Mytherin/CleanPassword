@@ -320,6 +320,32 @@ final class ExtensionModel: ObservableObject {
         }
     }
 
+    /// A strong password for the site (following its known rules).
+    func newPassword() -> String {
+        site.isEmpty ? ((try? generatePassword(recipe: .apple)) ?? "") : generateForSite(host: site)
+    }
+
+    /// Signing up: saves a new login for the site (synced, so other
+    /// devices have it), then fills it in.
+    func createLogin(user: String, password: String) async {
+        guard let s = session else { return }
+        busy = true
+        defer { busy = false }
+        var f = ItemFields.empty()
+        f.username = user.trimmingCharacters(in: .whitespaces)
+        f.password = password
+        if let service = services.first, !service.isEmpty {
+            f.websites = [Website(uri: service.contains("://") ? service : "https://\(service)", matching: .default)]
+        }
+        do {
+            _ = try s.add(fields: f)
+            try await saveAndSync(s)
+            complete(user: f.username, password: password)
+        } catch {
+            self.error = message(error)
+        }
+    }
+
     /// The logins a new passkey can go on.
     var registrationLogins: [SuggestedLogin] {
         guard let r = registration, let s = session else { return [] }
@@ -340,6 +366,44 @@ final class ExtensionModel: ObservableObject {
         } catch {
             self.error = message(error)
         }
+    }
+}
+
+/// Signing up on a site: a strong password, made for it, saved with the
+/// user name typed here, and filled in.
+struct NewLoginForm: View {
+    @EnvironmentObject var model: ExtensionModel
+    @State private var user = ""
+    @State private var password = ""
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("User name or email", text: $user)
+                    .textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                HStack {
+                    Text(password).font(.body.monospaced()).textSelection(.enabled)
+                    Spacer()
+                    Button { password = model.newPassword() } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Another Password")
+                }
+            } footer: {
+                Text("A strong password for \(model.site.isEmpty ? "this app" : model.site), saved in CleanPassword on all your devices, and filled in.")
+            }
+            if let e = model.error { Section { Text(e).foregroundStyle(.red) } }
+            Section {
+                Button {
+                    Task { await model.createLogin(user: user, password: password) }
+                } label: {
+                    HStack { Text("Save and Fill"); Spacer(); if model.busy { ProgressView() } }
+                }
+                .disabled(model.busy || password.isEmpty)
+            }
+        }
+        .navigationTitle("New Password")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { if password.isEmpty { password = model.newPassword() } }
     }
 }
 
@@ -467,6 +531,15 @@ struct ExtensionView: View {
 
     private var list: some View {
         List {
+            if query.isEmpty {
+                Section {
+                    NavigationLink {
+                        NewLoginForm()
+                    } label: {
+                        Label(model.site.isEmpty ? "New Password" : "New Password for \(model.site)", systemImage: "plus.circle")
+                    }
+                }
+            }
             if query.isEmpty && !model.passkeys.isEmpty {
                 Section("Passkeys for \(model.passkeyRequest?.rpId ?? model.site)") {
                     ForEach(model.passkeys, id: \.credentialId) { p in
