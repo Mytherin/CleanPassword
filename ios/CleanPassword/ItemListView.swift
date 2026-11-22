@@ -175,11 +175,19 @@ private struct SecurityList: View {
     @State private var leaked: [String: Int] = [:]
     @State private var checking = false
     @State private var checkError: String?
+    @State private var hidden = HiddenRecommendations.all()
+
+    private func isHidden(_ id: String) -> Bool {
+        HiddenRecommendations.isHidden(store.items.first { $0.id == id }, in: hidden)
+    }
 
     var body: some View {
-        let reused = store.findings.filter { $0.reused > 0 }
-        let weak = store.findings.filter { $0.reused == 0 && $0.weak }
-        let compromised = SortOrder.title.sorted(store.items.filter { (leaked[$0.id] ?? 0) > 0 })
+        let reused = store.findings.filter { $0.reused > 0 && !isHidden($0.id) }
+        let weak = store.findings.filter { $0.reused == 0 && $0.weak && !isHidden($0.id) }
+        let compromised = SortOrder.title.sorted(store.items.filter { (leaked[$0.id] ?? 0) > 0 && !isHidden($0.id) })
+        let hiddenItems = SortOrder.title.sorted(store.items.filter { i in
+            HiddenRecommendations.isHidden(i, in: hidden) && ((leaked[i.id] ?? 0) > 0 || store.findings.contains { $0.id == i.id })
+        })
         List {
             if detect && (!compromised.isEmpty || checking || checkError != nil) {
                 Section {
@@ -194,6 +202,7 @@ private struct SecurityList: View {
                                 }
                             }
                         }
+                        .swipeActions { hideButton(i.id) }
                     }
                     if checking { HStack { ProgressView(); Text("Checking for compromised passwords…").foregroundStyle(.secondary) } }
                     if let checkError { Text(checkError).font(.footnote).foregroundStyle(.secondary) }
@@ -234,9 +243,23 @@ private struct SecurityList: View {
                     Text("Change these to strong passwords: edit the item and tap the dice.")
                 }
             }
+            if !hiddenItems.isEmpty {
+                Section {
+                    DisclosureGroup("Hidden (\(hiddenItems.count))") {
+                        ForEach(hiddenItems) { i in
+                            NavigationLink(value: Route.item(id: i.id)) { ItemRow(item: i) }
+                                .swipeActions {
+                                    Button("Show") { setHidden(i.id, false) }.tint(.blue)
+                                }
+                        }
+                    }
+                } footer: {
+                    Text("Recommendations you hid come back when the password is changed. Swipe to show one again.")
+                }
+            }
         }
         .overlay {
-            if store.findings.isEmpty && store.duplicates == 0 && compromised.isEmpty && !checking && checkError == nil {
+            if reused.isEmpty && weak.isEmpty && hiddenItems.isEmpty && store.duplicates == 0 && compromised.isEmpty && !checking && checkError == nil {
                 ContentUnavailableView(
                     "No Security Recommendations", systemImage: "checkmark.shield",
                     description: Text(detect ? "No compromised, weak or reused passwords." : "No weak or reused passwords."))
@@ -272,6 +295,39 @@ private struct SecurityList: View {
                 }
             }
         }
+        .swipeActions { hideButton(f.id) }
+    }
+
+    private func hideButton(_ id: String) -> some View {
+        Button("Hide") { setHidden(id, true) }.tint(.gray)
+    }
+
+    private func setHidden(_ id: String, _ on: Bool) {
+        guard let item = store.items.first(where: { $0.id == id }) else { return }
+        HiddenRecommendations.set(item, hidden: on)
+        hidden = HiddenRecommendations.all()
+    }
+}
+
+/// Security recommendations hidden for an item, as Apple's Passwords lets
+/// you: until the item next changes. Kept on this iPhone, as item ids and
+/// modification times only.
+enum HiddenRecommendations {
+    private static let key = "hiddenRecommendations"
+
+    static func all() -> [String: Int64] {
+        (UserDefaults.standard.dictionary(forKey: key) ?? [:]).compactMapValues { ($0 as? NSNumber)?.int64Value }
+    }
+
+    static func isHidden(_ item: VaultItem?, in map: [String: Int64]) -> Bool {
+        guard let item else { return false }
+        return map[item.id] == item.modified
+    }
+
+    static func set(_ item: VaultItem, hidden: Bool) {
+        var map = all()
+        map[item.id] = hidden ? item.modified : nil
+        UserDefaults.standard.set(map.mapValues { NSNumber(value: $0) }, forKey: key)
     }
 }
 

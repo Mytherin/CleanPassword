@@ -12,6 +12,8 @@ struct PasswordsView: View {
     @State private var newItem = false
     @State private var showSettings = false
     @State private var showGenerator = false
+    /// Security recommendations hidden on this iPhone (not counted).
+    private var hidden: [String: Int64] { HiddenRecommendations.all() }
 
     var body: some View {
         Group {
@@ -79,7 +81,7 @@ struct PasswordsView: View {
                     tile(.all, count: store.items.count)
                     tile(.passkeys, count: store.items.filter { !$0.passkeys.isEmpty }.count)
                     tile(.codes, count: store.items.filter { !$0.fields.totp.isEmpty }.count)
-                    tile(.security, count: store.findings.count)
+                    tile(.security, count: store.findings.filter { f in !HiddenRecommendations.isHidden(store.items.first { $0.id == f.id }, in: hidden) }.count)
                     tile(.deleted, count: store.trash.count)
                     tile(.favorites, count: store.items.filter { $0.fields.favorite }.count)
                 }
