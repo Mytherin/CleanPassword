@@ -82,16 +82,41 @@ final class VaultStore: ObservableObject {
         try? await Core.shared.persist()
         phase = .unlocked
         await reload()
+        if let d = lockedDraft {
+            lockedDraft = nil
+            reopenDraft = d
+        }
         sync()
     }
+
+    // MARK: Drafts
+
+    /// An editor's unsaved work.
+    struct Draft: Identifiable {
+        let id = UUID()
+        var itemId: String?
+        var original: ItemFields
+        var edited: ItemFields
+    }
+
+    /// What the open editor holds, as it's typed (not published: it changes
+    /// with every key).
+    var editing: Draft?
+    /// The editor that was open when the vault locked, until it's unlocked.
+    private var lockedDraft: Draft?
+    /// That editor, to open again now that the vault is unlocked.
+    @Published var reopenDraft: Draft?
 
     /// Whether the unlock screen starts Face ID by itself. Not right after
     /// Lock Now: the user is looking at the phone, so it would unlock again.
     private(set) var offerBiometrics = true
 
-    /// Locks, and forgets what was shown (passwords included).
+    /// Locks, and forgets what was shown (passwords included); an open
+    /// editor's work is kept to reopen after unlocking.
     func lock(manually: Bool = false) {
         offerBiometrics = !manually
+        if let d = editing { lockedDraft = d }
+        editing = nil
         Core.shared.lock()
         items = []
         trash = []
@@ -101,6 +126,9 @@ final class VaultStore: ObservableObject {
 
     /// Removes the vault from this iPhone (not from S3).
     func forget() {
+        editing = nil
+        lockedDraft = nil
+        reopenDraft = nil
         if let id = vaultId { BiometricKey.remove(vaultId: id) }
         Core.shared.lock()
         SavedVault.remove()

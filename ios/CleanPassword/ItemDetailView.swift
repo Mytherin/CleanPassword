@@ -11,6 +11,10 @@ struct ItemDetailView: View {
     let id: String
 
     @State private var revealed = false
+    /// Hidden fields and earlier passwords shown, each on its own.
+    @State private var revealedFields: Set<Int> = []
+    @State private var revealedOld: Set<Int> = []
+    @State private var failure: String?
     @State private var editing = false
     @State private var confirmDelete = false
     @State private var copied: String?
@@ -47,9 +51,16 @@ struct ItemDetailView: View {
                 }
                 if !f.websites.isEmpty {
                     Section("Websites") {
-                        ForEach(f.websites, id: \.uri) { w in
+                        ForEach(Array(f.websites.enumerated()), id: \.offset) { _, w in
+                            let url = URL(string: w.uri.contains("://") ? w.uri : "https://\(w.uri)")
                             Button(w.uri) {
-                                if let url = URL(string: w.uri.contains("://") ? w.uri : "https://\(w.uri)") { openURL(url) }
+                                if let url { openURL(url) }
+                            }
+                            .contextMenu {
+                                if let url {
+                                    Button { openURL(url) } label: { Label("Open Website", systemImage: "safari") }
+                                }
+                                Button { UIPasteboard.general.string = w.uri } label: { Label("Copy Website", systemImage: "doc.on.doc") }
                             }
                         }
                     }
@@ -82,7 +93,11 @@ struct ItemDetailView: View {
             if !f.fields.isEmpty {
                 Section("Fields") {
                     ForEach(Array(f.fields.enumerated()), id: \.offset) { n, c in
-                        copyRow(c.name, c.hidden && !revealed ? String(repeating: "•", count: 8) : c.value, key: "field\(n)", copy: c.value)
+                        if c.hidden {
+                            secretRow(c.name, c.value, shown: revealedFields.contains(n), key: "field\(n)", mono: false) { revealedFields.formSymmetricDifference([n]) }
+                        } else {
+                            copyRow(c.name, c.value, key: "field\(n)")
+                        }
                     }
                 }
             }
@@ -93,7 +108,8 @@ struct ItemDetailView: View {
                 Section {
                     DisclosureGroup("Earlier Passwords (\(item.history.count))") {
                         ForEach(Array(item.history.enumerated()), id: \.offset) { n, h in
-                            copyRow(Date(timeIntervalSince1970: TimeInterval(h.retired)).formatted(date: .abbreviated, time: .omitted), h.password, key: "old\(n)", mono: true)
+                            secretRow(Date(timeIntervalSince1970: TimeInterval(h.retired)).formatted(date: .abbreviated, time: .omitted), h.password,
+                                      shown: revealedOld.contains(n), key: "old\(n)", mono: true) { revealedOld.formSymmetricDifference([n]) }
                         }
                     }
                 }
@@ -113,7 +129,9 @@ struct ItemDetailView: View {
         .confirmationDialog("Delete this passkey?", isPresented: Binding(get: { deletingPasskey != nil }, set: { if !$0 { deletingPasskey = nil } }), titleVisibility: .visible) {
             Button("Delete Passkey", role: .destructive) {
                 if let p = deletingPasskey {
-                    Task { try? await store.change { try $0.deletePasskey(itemId: item.id, id: p.id) } }
+                    Task {
+                        do { try await store.change { try $0.deletePasskey(itemId: item.id, id: p.id) } } catch { failure = message(error) }
+                    }
                 }
                 deletingPasskey = nil
             }
@@ -123,12 +141,41 @@ struct ItemDetailView: View {
         .confirmationDialog("Move “\(f.name)” to Deleted?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
                 Task {
-                    try? await store.change { try $0.delete(id: item.id) }
-                    dismiss()
+                    do {
+                        try await store.change { try $0.delete(id: item.id) }
+                        dismiss()
+                    } catch {
+                        failure = message(error)
+                    }
                 }
             }
         } message: {
             Text("You can recover it from Deleted for 30 days.")
+        }
+        .alert("Couldn't Delete", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK") { failure = nil }
+        } message: {
+            Text(failure ?? "")
+        }
+    }
+
+    /// A secret shown as dots until tapped (a hidden field, an earlier
+    /// password), with its copy button.
+    private func secretRow(_ label: String, _ value: String, shown: Bool, key: String, mono: Bool, toggle: @escaping () -> Void) -> some View {
+        Button(action: toggle) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label).font(.caption).foregroundStyle(.secondary)
+                    Text(shown ? value : String(repeating: "•", count: 8))
+                        .font(mono ? .body.monospaced() : .body).foregroundStyle(.primary)
+                }
+                Spacer()
+                copyButton(value, key: key)
+            }
+        }
+        .contextMenu {
+            Button { copySecret(value) } label: { Label("Copy \(label)", systemImage: "doc.on.doc") }
+            Button(action: toggle) { Label(shown ? "Hide" : "Show", systemImage: shown ? "eye.slash" : "eye") }
         }
     }
 

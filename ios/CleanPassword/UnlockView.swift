@@ -8,6 +8,8 @@ struct UnlockView: View {
     @State private var error: String?
     @State private var confirmForget = false
     @FocusState private var focused: Bool
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var wasInBackground = false
 
     var body: some View {
         VStack(spacing: 20) {
@@ -44,15 +46,38 @@ struct UnlockView: View {
                 .font(.footnote)
         }
         .padding(24)
-        .task {
-            if store.offerBiometrics, store.biometricsOn, await store.unlockWithBiometrics() { return }
-            focused = true
+        .task { await offerBiometrics() }
+        // Locked on leaving the app (Lock After: Immediately), this screen
+        // appears while the app is in the background, where Face ID can't
+        // run: offer it on coming back. Only after the background, not
+        // after Face ID's own prompt (which makes the app inactive too).
+        .onChange(of: scenePhase) { _, p in
+            if p == .background { wasInBackground = true }
+            if p == .active && wasInBackground {
+                wasInBackground = false
+                Task { await offerBiometrics() }
+            }
         }
         .confirmationDialog("Remove the vault from this iPhone?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Remove", role: .destructive) { store.forget() }
         } message: {
             Text("It stays in S3. Changes made here that haven't synced yet are lost.")
         }
+    }
+
+    private func offerBiometrics() async {
+        guard scenePhase == .active else {
+            wasInBackground = true
+            return
+        }
+        guard !busy else { return }
+        if store.offerBiometrics, store.biometricsOn {
+            busy = true
+            let unlocked = await store.unlockWithBiometrics()
+            busy = false
+            if unlocked { return }
+        }
+        focused = true
     }
 
     private func unlock() async {

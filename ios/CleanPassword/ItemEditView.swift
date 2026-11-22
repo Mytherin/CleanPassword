@@ -1,26 +1,49 @@
 import SwiftUI
 
+/// Editing an item, or making a new one.
+///
+/// - What's typed is kept in `store.editing` as it changes: if the vault
+///   locks meanwhile (switching apps to copy a setup key, with Lock After
+///   set to Immediately), the editor opens again with it after unlocking.
+/// - Saving applies only the fields changed here to the item as it is now,
+///   so a change synced from another device while the editor was open isn't
+///   undone.
 struct ItemEditView: View {
     @EnvironmentObject private var store: VaultStore
     @Environment(\.dismiss) private var dismiss
-    let item: VaultItem?
+    let itemId: String?
+    /// The fields as they were when editing began.
+    private let original: ItemFields
     @State private var f: ItemFields
     @State private var websites: [Site]
+    @State private var custom: [Field]
 
     struct Site: Identifiable {
         let id = UUID()
         var uri: String
+        var matching: Matching = .default
     }
+
+    struct Field: Identifiable {
+        let id = UUID()
+        var name: String
+        var value: String
+        var hidden: Bool
+    }
+
     @State private var showPassword = false
     @State private var error: String?
     @State private var busy = false
     @AppStorage("recipe") private var recipeData = Data()
 
-    init(item: VaultItem?) {
-        self.item = item
-        let fields = item?.fields ?? .empty()
+    init(item: VaultItem?, draft: VaultStore.Draft? = nil) {
+        itemId = draft?.itemId ?? item?.id
+        original = draft?.original ?? item?.fields ?? .empty()
+        let fields = draft?.edited ?? item?.fields ?? .empty()
         _f = State(initialValue: fields)
-        _websites = State(initialValue: fields.websites.isEmpty ? [Site(uri: "")] : fields.websites.map { Site(uri: $0.uri) })
+        _websites = State(initialValue: fields.websites.isEmpty ? [Site(uri: "")] : fields.websites.map { Site(uri: $0.uri, matching: $0.matching) })
+        _custom = State(initialValue: fields.fields.map { Field(name: $0.name, value: $0.value, hidden: $0.hidden) })
+        _showPassword = State(initialValue: draft != nil && item == nil)
     }
 
     var body: some View {
@@ -31,6 +54,10 @@ struct ItemEditView: View {
                     Text("Secure Note").tag(Kind.note)
                 }
                 TextField("Name", text: $f.name)
+            } footer: {
+                if f.kind == .note && original.kind == .login && hasLoginFields {
+                    Text("The user name, password, websites and verification code are removed when you save it as a note.")
+                }
             }
             if f.kind == .login {
                 Section {
@@ -41,27 +68,66 @@ struct ItemEditView: View {
                         }
                         .textInputAutocapitalization(.never).autocorrectionDisabled().font(.body.monospaced())
                         Button { showPassword.toggle() } label: { Image(systemName: showPassword ? "eye.slash" : "eye") }.buttonStyle(.borderless)
+                            .accessibilityLabel(showPassword ? "Hide Password" : "Show Password")
                         Button {
-                            f.password = (try? generatePassword(recipe: GeneratorView.savedRecipe(recipeData))) ?? f.password
+                            f.password = generated() ?? f.password
                             showPassword = true
                         } label: { Image(systemName: "dice") }.buttonStyle(.borderless)
+                            .accessibilityLabel("Generate Password")
                     }
                     if !f.password.isEmpty { StrengthMeter(password: f.password) }
                 }
-                Section("Websites") {
+                Section {
                     ForEach($websites) { $site in
-                        TextField("https://example.com", text: $site.uri).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        HStack {
+                            TextField("https://example.com", text: $site.uri).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                            Menu {
+                                Picker("Match", selection: $site.matching) {
+                                    ForEach(Self.matchings, id: \.0) { m in Text(m.1).tag(m.0) }
+                                }
+                            } label: {
+                                Image(systemName: site.matching == .default ? "link" : site.matching == .never ? "link.badge.minus" : "link.badge.plus")
+                            }
+                            .accessibilityLabel("Matching")
+                        }
                     }
                     .onDelete { websites.remove(atOffsets: $0) }
                     Button("Add Website") { websites.append(Site(uri: "")) }
+                } header: {
+                    Text("Websites")
+                } footer: {
+                    if let m = websites.first(where: { $0.matching != .default })?.matching, let name = Self.matchings.first(where: { $0.0 == m })?.1 {
+                        Text("A website marked with a badge matches by “\(name)” instead of the site's domain.")
+                    }
                 }
                 Section {
-                    TextField("otpauth://… or the secret", text: $f.totp).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("otpauth://… or the setup key", text: $f.totp).textInputAutocapitalization(.never).autocorrectionDisabled()
                 } header: {
-                    Text("One-time code (TOTP)")
+                    Text("Verification Code")
                 } footer: {
-                    if !f.totp.isEmpty && !isValidTotp(secret: f.totp) { Text("That isn't a valid TOTP secret.").foregroundStyle(.red) }
+                    if totpInvalid { Text("That isn't a valid setup key.").foregroundStyle(.red) }
                 }
+            }
+            Section {
+                ForEach($custom) { $field in
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextField("Label", text: $field.name).font(.subheadline)
+                        HStack {
+                            Group {
+                                if field.hidden { SecureField("Value", text: $field.value) } else { TextField("Value", text: $field.value) }
+                            }
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            Button { field.hidden.toggle() } label: { Image(systemName: field.hidden ? "eye.slash" : "eye") }.buttonStyle(.borderless)
+                                .accessibilityLabel(field.hidden ? "Hidden Field" : "Visible Field")
+                        }
+                    }
+                }
+                .onDelete { custom.remove(atOffsets: $0) }
+                Button("Add Field") { custom.append(Field(name: "", value: "", hidden: false)) }
+            } header: {
+                Text("Fields")
+            } footer: {
+                if !custom.isEmpty { Text("Tap the eye to hide a field's value, as for a password.") }
             }
             Section {
                 TextField("Folder", text: $f.folder)
@@ -74,24 +140,101 @@ struct ItemEditView: View {
                 Section { Text(error).foregroundStyle(.red) }
             }
         }
-        .navigationTitle(item == nil ? "New Item" : "Edit")
+        .navigationTitle(itemId == nil ? "New Item" : "Edit")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { Task { await save() } }.disabled(busy)
+                Button("Save") { Task { await save() } }.disabled(busy || !canSave)
             }
         }
+        .onAppear { keepDraft() }
+        .onChange(of: f) { _, _ in keepDraft() }
+        .onChange(of: websites.map(\.uri)) { _, _ in keepDraft() }
+        .onChange(of: websites.map(\.matching)) { _, _ in keepDraft() }
+        .onChange(of: custom.map { [$0.name, $0.value, $0.hidden ? "1" : ""] }) { _, _ in keepDraft() }
+        .onDisappear {
+            // Cancelled or saved: forget the draft. Locked: keep it.
+            if store.phase == .unlocked { store.editing = nil }
+        }
+    }
+
+    static let matchings: [(Matching, String)] = [
+        (.default, "Default"), (.domain, "Base domain"), (.host, "Host"), (.startsWith, "Starts with"),
+        (.exact, "Exact"), (.regex, "Regular expression"), (.never, "Never"),
+    ]
+
+    private var totpInvalid: Bool {
+        let t = f.totp.trimmingCharacters(in: .whitespaces)
+        return f.kind == .login && !t.isEmpty && !isValidTotp(secret: t)
+    }
+
+    private var hasLoginFields: Bool {
+        !f.username.isEmpty || !f.password.isEmpty || !f.totp.isEmpty || websites.contains { !$0.uri.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
+    private var canSave: Bool {
+        let fields = composed()
+        let empty = fields.name.trimmingCharacters(in: .whitespaces).isEmpty && fields.username.isEmpty && fields.password.isEmpty
+            && fields.websites.isEmpty && fields.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && fields.fields.isEmpty
+        return !empty && !totpInvalid
+    }
+
+    /// A strong password: for the item's site, following its known rules,
+    /// when the generator is on Apple's style; else in the saved style.
+    private func generated() -> String? {
+        let recipe = GeneratorView.savedRecipe(recipeData)
+        if case .apple = recipe, let host = composed().websites.lazy.compactMap({ Self.host($0.uri) }).first {
+            return generateForSite(host: host)
+        }
+        return try? generatePassword(recipe: recipe)
+    }
+
+    static func host(_ uri: String) -> String? {
+        URL(string: uri.contains("://") ? uri : "https://\(uri)")?.host
+    }
+
+    /// The fields as typed, ready to save.
+    private func composed() -> ItemFields {
+        var fields = f
+        fields.websites = websites.compactMap { site in
+            let uri = site.uri.trimmingCharacters(in: .whitespaces)
+            return uri.isEmpty ? nil : Website(uri: uri, matching: site.matching)
+        }
+        fields.fields = custom.filter { !$0.name.isEmpty || !$0.value.isEmpty }.map { CustomField(name: $0.name, value: $0.value, hidden: $0.hidden) }
+        fields.totp = fields.totp.trimmingCharacters(in: .whitespaces)
+        if fields.kind == .note {
+            fields.username = ""
+            fields.password = ""
+            fields.websites = []
+            fields.totp = ""
+        }
+        return fields
+    }
+
+    private func keepDraft() {
+        store.editing = VaultStore.Draft(itemId: itemId, original: original, edited: composed())
+    }
+
+    /// Each field changed here, on top of the item as it is now.
+    static func rebase(edited e: ItemFields, original o: ItemFields, onto c: ItemFields) -> ItemFields {
+        func pick<T: Equatable>(_ k: KeyPath<ItemFields, T>) -> T { e[keyPath: k] != o[keyPath: k] ? e[keyPath: k] : c[keyPath: k] }
+        return ItemFields(
+            kind: pick(\.kind), name: pick(\.name), username: pick(\.username), password: pick(\.password),
+            websites: pick(\.websites), totp: pick(\.totp), notes: pick(\.notes), folder: pick(\.folder),
+            favorite: pick(\.favorite), fields: pick(\.fields))
     }
 
     private func save() async {
         busy = true
         defer { busy = false }
-        var fields = f
-        let previous = Dictionary(f.websites.map { ($0.uri, $0.matching) }, uniquingKeysWith: { a, _ in a })
-        fields.websites = websites.map { $0.uri.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { Website(uri: $0, matching: previous[$0] ?? .default) }
+        var fields = composed()
+        if let id = itemId, let current = store.items.first(where: { $0.id == id })?.fields {
+            fields = Self.rebase(edited: fields, original: original, onto: current)
+        }
         do {
-            _ = try await store.save(id: item?.id, fields: fields)
+            _ = try await store.save(id: itemId, fields: fields)
+            store.editing = nil
             dismiss()
         } catch {
             self.error = message(error)
