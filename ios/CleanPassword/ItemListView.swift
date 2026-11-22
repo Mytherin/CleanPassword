@@ -166,14 +166,45 @@ struct CountdownRing: View {
     }
 }
 
-/// Reused passwords first, then weak ones.
+/// Compromised passwords first (found in data leaks), then reused, then
+/// weak ones.
 private struct SecurityList: View {
     @EnvironmentObject private var store: VaultStore
+    @AppStorage(Breaches.settingKey) private var detect = true
+    /// Leak counts by item id, of the logins checked.
+    @State private var leaked: [String: Int] = [:]
+    @State private var checking = false
+    @State private var checkError: String?
 
     var body: some View {
         let reused = store.findings.filter { $0.reused > 0 }
         let weak = store.findings.filter { $0.reused == 0 && $0.weak }
+        let compromised = SortOrder.title.sorted(store.items.filter { (leaked[$0.id] ?? 0) > 0 })
         List {
+            if detect && (!compromised.isEmpty || checking || checkError != nil) {
+                Section {
+                    ForEach(compromised) { i in
+                        let n = leaked[i.id] ?? 0
+                        NavigationLink(value: Route.item(id: i.id)) {
+                            HStack(spacing: 12) {
+                                SiteIcon(name: i.fields.name, host: i.host)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(i.fields.name)
+                                    Text(n == 1 ? "Appeared in a data leak" : "Appeared in data leaks \(n.formatted()) times").font(.subheadline).foregroundStyle(.red)
+                                }
+                            }
+                        }
+                    }
+                    if checking { HStack { ProgressView(); Text("Checking for compromised passwords…").foregroundStyle(.secondary) } }
+                    if let checkError { Text(checkError).font(.footnote).foregroundStyle(.secondary) }
+                } header: {
+                    Text("Compromised Passwords")
+                } footer: {
+                    if !compromised.isEmpty {
+                        Text("These passwords are known to attackers, from leaks of some site's data. Change them now, everywhere you use them.")
+                    }
+                }
+            }
             if store.duplicates > 0 {
                 Section {
                     Button(store.duplicates == 1 ? "Merge 1 Duplicate" : "Merge \(store.duplicates) Duplicates") {
@@ -205,9 +236,29 @@ private struct SecurityList: View {
             }
         }
         .overlay {
-            if store.findings.isEmpty && store.duplicates == 0 {
-                ContentUnavailableView("No Security Recommendations", systemImage: "checkmark.shield", description: Text("No weak or reused passwords."))
+            if store.findings.isEmpty && store.duplicates == 0 && compromised.isEmpty && !checking && checkError == nil {
+                ContentUnavailableView(
+                    "No Security Recommendations", systemImage: "checkmark.shield",
+                    description: Text(detect ? "No compromised, weak or reused passwords." : "No weak or reused passwords."))
             }
+        }
+        .refreshable { await check() }
+        .task(id: store.items.map(\.fields.password).hashValue) { await check() }
+    }
+
+    /// Looks up each login's password (by hash prefix only).
+    private func check() async {
+        guard detect else { return }
+        let logins = store.items.filter { $0.fields.kind == .login && !$0.fields.password.isEmpty }
+        guard !logins.isEmpty else { return }
+        checking = true
+        defer { checking = false }
+        do {
+            let counts = try await Breaches.shared.counts(for: Set(logins.map(\.fields.password)))
+            leaked = Dictionary(uniqueKeysWithValues: logins.map { ($0.id, counts[$0.fields.password] ?? 0) })
+            checkError = nil
+        } catch {
+            checkError = "Couldn't check for compromised passwords: \(error.localizedDescription)"
         }
     }
 

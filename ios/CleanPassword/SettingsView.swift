@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var biometrics = false
     @State private var suggestions = SuggestionStore.enabled
     @AppStorage(SiteIcons.settingKey) private var siteIcons = true
+    @AppStorage(Breaches.settingKey) private var detectCompromised = true
     @State private var importing = false
     @State private var importText: String?
     @State private var importPassword = ""
@@ -52,8 +53,11 @@ struct SettingsView: View {
                     Text("1 hour").tag(3600)
                 }
                 NavigationLink("Change Master Password") { ChangePasswordView() }
+                Toggle("Detect Compromised Passwords", isOn: $detectCompromised)
             } header: {
                 Text("Security")
+            } footer: {
+                Text("Compromised passwords are found by checking the start of each password's hash (never the password) against Have I Been Pwned's list of leaked passwords.")
             }
             Section {
                 Button("Turn On AutoFill…") {
