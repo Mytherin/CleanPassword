@@ -293,7 +293,7 @@ impl Item {
                 self.history.push(h.clone());
             }
         }
-        self.history.sort_by(|a, b| b.retired.cmp(&a.retired));
+        self.history.sort_by_key(|h| std::cmp::Reverse(h.retired));
         self.history.truncate(HISTORY_LIMIT);
         let changed = before != (self.data(), self.history.len(), self.passkeys.len());
         if changed {

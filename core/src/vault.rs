@@ -770,7 +770,7 @@ pub(crate) mod tests {
         let pk = v.create_passkey(&req, None).unwrap().item_id;
         assert_ne!(pk, with_pw, "bob's passkey gets a login of its own");
         let ids = |m: Vec<Match>| m.into_iter().map(|m| m.id).collect::<Vec<_>>();
-        assert_eq!(ids(v.matches("https://example.com/login")), [with_pw.clone()]);
+        assert_eq!(ids(v.matches("https://example.com/login")), std::slice::from_ref(&with_pw));
         let all = ids(v.site_logins("https://example.com/login"));
         assert!(all.contains(&with_pw) && all.contains(&pk));
 
