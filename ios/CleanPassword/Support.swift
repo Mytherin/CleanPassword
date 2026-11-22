@@ -61,8 +61,8 @@ enum Category: Hashable {
     }
 }
 
-/// An item's icon: its first letter on a colour of its own (Apple's shows
-/// the site's icon; that would mean fetching it from the site).
+/// An item's first letter on a colour of its own: its icon until (or
+/// unless) the site's own is loaded (`SiteIcon`).
 struct Monogram: View {
     let name: String
     var size: CGFloat = 32
@@ -84,7 +84,7 @@ struct ItemRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Monogram(name: item.fields.name)
+            SiteIcon(name: item.fields.name, host: item.host)
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.fields.name).lineLimit(1)
                 Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)

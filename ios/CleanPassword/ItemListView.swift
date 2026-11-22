@@ -118,7 +118,7 @@ private struct CodesList: View {
                     }
                 } label: {
                     HStack(spacing: 12) {
-                        Monogram(name: i.fields.name)
+                        SiteIcon(name: i.fields.name, host: i.host)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(i.fields.name).foregroundStyle(.primary)
                             Text(copied == i.id ? "Copied" : i.fields.username).font(.subheadline).foregroundStyle(.secondary)
@@ -214,7 +214,7 @@ private struct SecurityList: View {
     private func row(_ f: AuditFinding, _ why: String) -> some View {
         NavigationLink(value: Route.item(id: f.id)) {
             HStack(spacing: 12) {
-                Monogram(name: f.name)
+                SiteIcon(name: f.name, host: store.items.first { $0.id == f.id }?.host)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(f.name)
                     Text(why).font(.subheadline).foregroundStyle(.orange)

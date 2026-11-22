@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var accessKeyId = ""
     @State private var biometrics = false
     @State private var suggestions = SuggestionStore.enabled
+    @AppStorage(SiteIcons.settingKey) private var siteIcons = true
     @State private var importing = false
     @State private var importText: String?
     @State private var importPassword = ""
@@ -67,6 +68,12 @@ struct SettingsView: View {
                 Text("AutoFill")
             } footer: {
                 Text("In Settings → General → AutoFill & Passwords, turn on CleanPassword. Suggestions show user names and websites (never passwords) to iOS so it can offer them above the keyboard.")
+            }
+            Section {
+                Toggle("Show Website Icons", isOn: $siteIcons)
+                    .onChange(of: siteIcons) { _, on in if !on { SiteIcons.clear() } }
+            } footer: {
+                Text("Icons are fetched from each website itself (never with your passwords) and kept on this iPhone.")
             }
             Section("Data") {
                 Button("Import…") { importing = true }

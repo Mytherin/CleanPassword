@@ -36,7 +36,7 @@ struct ItemDetailView: View {
         return List {
             Section {
                 VStack(spacing: 8) {
-                    Monogram(name: f.name, size: 64)
+                    SiteIcon(name: f.name, host: item.host, size: 64)
                     Text(f.name).font(.title2.bold()).multilineTextAlignment(.center)
                     Text("Modified \(Date(timeIntervalSince1970: TimeInterval(item.modified)).formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption).foregroundStyle(.secondary)
