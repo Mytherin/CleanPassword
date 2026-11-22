@@ -35,6 +35,34 @@ enum SavedVault {
     static func remove() {
         try? FileManager.default.removeItem(at: url)
     }
+
+    /// Saves `session` without losing what the other process (the app, or
+    /// its AutoFill extension) saved since this one last read or saved the
+    /// file (`lastSaved`): a copy on disk that differs is merged in first
+    /// (`absorb`). A file coordinator holds the other process off from
+    /// reading or writing meanwhile. Returns what was written, and how many
+    /// items the merge changed in `session`.
+    ///
+    /// Throws if the copy on disk is another vault's (the vault was set up
+    /// again in the app), so the old one never overwrites it.
+    static func write(_ session: VaultSession, lastSaved: String?) throws -> (text: String, absorbed: UInt64) {
+        try FileManager.default.createDirectory(at: AppGroup.container, withIntermediateDirectories: true)
+        var result: Result<(text: String, absorbed: UInt64), Error> = .failure(CocoaError(.fileWriteUnknown))
+        var coordinationError: NSError?
+        NSFileCoordinator().coordinate(writingItemAt: url, options: .forMerging, error: &coordinationError) { at in
+            result = Result {
+                var absorbed: UInt64 = 0
+                if let disk = try? String(contentsOf: at, encoding: .utf8), disk != lastSaved {
+                    absorbed = try session.absorb(saved: disk)
+                }
+                let text = session.save()
+                try Data(text.utf8).write(to: at, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                return (text, absorbed)
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        return try result.get()
+    }
 }
 
 /// Runs the core's calls one at a time on a queue of their own: a sync
@@ -87,25 +115,30 @@ final class Core: @unchecked Sendable {
         queue.async { self.session = nil }
     }
 
-    /// What this process last saved (or opened).
+    /// What this process last saved (only touched on `queue`).
     private var lastSaved: String?
 
-    /// Saves the vault to the shared container (call after every change).
+    /// Saves the vault to the shared container (call after every change),
+    /// merging in anything the AutoFill extension saved meanwhile.
     func persist() async throws {
-        let text = try await run { $0.save() }
-        try SavedVault.store(text)
-        queue.sync { lastSaved = text }
+        _ = try await run { s in
+            let r = try SavedVault.write(s, lastSaved: self.lastSaved)
+            self.lastSaved = r.text
+            return r.absorbed
+        }
     }
 
-    /// Opens the saved vault again if another process (the AutoFill
-    /// extension, saving a new passkey) changed it since this one saved it.
-    /// Returns whether it did.
+    /// Takes in what another process (the AutoFill extension, saving a new
+    /// passkey) saved since this one last saved, if anything. Returns
+    /// whether that changed any items.
     func reloadIfChangedOnDisk() async -> Bool {
-        guard let text = SavedVault.load(), text != queue.sync(execute: { lastSaved }) else { return false }
-        guard let key = try? await run({ $0.key() }), let s = try? await detached({ try VaultSession.unlockWithKey(saved: text, key: key) }) else { return false }
-        await open(s)
-        queue.sync { lastSaved = text }
-        return true
+        let absorbed = try? await run { s -> UInt64 in
+            guard let disk = SavedVault.load(), disk != self.lastSaved else { return 0 }
+            let r = try SavedVault.write(s, lastSaved: self.lastSaved)
+            self.lastSaved = r.text
+            return r.absorbed
+        }
+        return (absorbed ?? 0) > 0
     }
 }
 

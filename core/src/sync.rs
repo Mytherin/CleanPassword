@@ -32,7 +32,7 @@ use zeroize::Zeroizing;
 use crate::crypto;
 use crate::item::{merge, Item};
 use crate::s3::{Client, Cond, Put, Transport};
-use crate::vault::{AwsCredentials, S3Config, Vault, VaultHeader};
+use crate::vault::{AwsCredentials, S3Config, Secrets, Vault, VaultHeader};
 use crate::{Error, Result};
 
 pub const HEADER_OBJECT: &str = "vault.json";
@@ -269,6 +269,40 @@ impl Vault {
         }
         Ok(())
     }
+
+    /// Takes in what another process saved of this same vault since this
+    /// one last read or saved it (the iPhone app and its AutoFill extension
+    /// share one saved copy), so neither overwrites the other's changes.
+    ///
+    /// Items are merged three-way, as in a sync, from the older of the two
+    /// synced copies. What was last synced (the synced copy, the ETags, the
+    /// header, when) comes from the side that synced more recently: the
+    /// saved copy if neither did. A master password changed here and not
+    /// uploaded yet is kept. Returns how many items changed here.
+    pub fn absorb(&mut self, saved: &str) -> Result<usize> {
+        let other = Vault::unlock_with_key(saved, &self.key_b64())?;
+        if other.header.vault_id != self.header.vault_id {
+            return Err(Error::DifferentVault);
+        }
+        let before = std::mem::take(&mut self.s.items);
+        let theirs_newer = other.last_sync >= self.last_sync;
+        let mut merged = BTreeSet::new();
+        let base = if theirs_newer { &self.s.base } else { &other.s.base };
+        let items = merge_vault(base, &before, &other.s.items, &mut merged);
+        if theirs_newer {
+            let Vault { config, header, s, last_sync, .. } = other;
+            if !(self.s.header_dirty && !s.header_dirty) {
+                self.header = header;
+            }
+            let header_dirty = self.s.header_dirty || s.header_dirty;
+            self.config = config;
+            self.last_sync = last_sync;
+            self.s = Secrets { items, header_dirty, ..s };
+        } else {
+            self.s.items = items;
+        }
+        Ok(changed(&before, &self.s.items))
+    }
 }
 
 #[cfg(test)]
@@ -301,6 +335,48 @@ mod tests {
 
     fn vault_bin(s3: &FakeS3) -> Vec<u8> {
         s3.objects.borrow()[&format!("Vault/{VAULT_OBJECT}")].0.clone()
+    }
+
+    /// The iPhone app and its AutoFill extension share one saved copy: each
+    /// takes in the other's before saving.
+    #[test]
+    fn absorb_keeps_both_processes_changes() {
+        let (s3, mut app, _) = setup();
+        let shared = app.add(login("Shared", "https://shared.com", "me", "pw0")).unwrap();
+        block_on(app.sync(&s3)).unwrap();
+        let mut ext = Vault::unlock_with_key(&app.save(), &app.key_b64()).unwrap();
+
+        // The extension saves a passkey's login and syncs; the app edits
+        // another login meanwhile, without seeing that.
+        let from_ext = ext.add(login("Ext", "https://ext.com", "me", "pw1")).unwrap();
+        block_on(ext.sync(&s3)).unwrap();
+        let mut d = app.get(&shared).unwrap().data();
+        d.notes = "edited in the app".into();
+        app.update(&shared, d).unwrap();
+
+        assert_eq!(app.absorb(&ext.save()).unwrap(), 1);
+        assert!(app.get(&from_ext).is_some(), "the extension's item is kept");
+        assert_eq!(app.get(&shared).unwrap().notes, "edited in the app", "and so is the app's edit");
+        assert_eq!(app.last_sync(), ext.last_sync(), "the newer sync is adopted");
+        let r = block_on(app.sync(&s3)).unwrap();
+        assert_eq!((r.uploaded, r.downloaded), (1, 0), "only the app's edit is new to S3");
+
+        // The other way round: the extension, synced earlier, takes in the
+        // app's newer copy, and a delete made there.
+        app.delete(&from_ext).unwrap();
+        app.purge(&from_ext).unwrap();
+        assert!(ext.absorb(&app.save()).unwrap() >= 2);
+        assert!(ext.get(&from_ext).is_none());
+        assert_eq!(ext.get(&shared).unwrap().notes, "edited in the app");
+
+        // An identical copy changes nothing.
+        let same = app.save();
+        assert_eq!(app.absorb(&same).unwrap(), 0);
+        assert!(app.has_unsynced_changes());
+
+        // Another vault's copy is refused.
+        let other = Vault::create(config(), creds(), PW).unwrap();
+        assert!(app.absorb(&other.save()).is_err());
     }
 
     #[test]

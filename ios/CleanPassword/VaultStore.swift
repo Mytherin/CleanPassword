@@ -114,11 +114,10 @@ final class VaultStore: ObservableObject {
     // MARK: Items
 
     func reload() async {
-        let all = try? await Core.shared.run { s in (s.items(), s.trash(), s.audit(), s.duplicates()) }
-        items = all?.0 ?? []
-        trash = all?.1 ?? []
-        findings = all?.2 ?? []
-        duplicates = all?.3 ?? 0
+        // Locked meanwhile (lock() already cleared what was shown): leave
+        // the suggestions above the keyboard as they are.
+        guard let all = try? await Core.shared.run({ s in (s.items(), s.trash(), s.audit(), s.duplicates()) }) else { return }
+        (items, trash, findings, duplicates) = all
         SuggestionStore.update(with: items)
     }
 
@@ -142,11 +141,22 @@ final class VaultStore: ObservableObject {
 
     // MARK: Syncing
 
+    /// A change made while a sync was running, to upload when it's done.
+    private var syncAgain = false
+
     func sync() {
-        guard !syncing, Core.shared.isUnlocked else { return }
+        guard Core.shared.isUnlocked else { return }
+        guard !syncing else {
+            syncAgain = true
+            return
+        }
         syncing = true
+        syncAgain = false
         Task {
-            defer { syncing = false }
+            defer {
+                syncing = false
+                if syncAgain { sync() }
+            }
             do {
                 let r = try await Core.shared.run { try $0.sync() }
                 try await Core.shared.persist()

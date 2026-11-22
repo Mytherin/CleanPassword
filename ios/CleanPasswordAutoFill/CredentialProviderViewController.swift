@@ -171,21 +171,26 @@ final class ExtensionModel: ObservableObject {
         guard let saved = SavedVault.load(), let id = info?.vaultId, BiometricKey.exists(vaultId: id) else { return }
         let key = await Task.detached { BiometricKey.read(vaultId: id, reason: "Unlock CleanPassword") }.value
         guard let key, let s = try? VaultSession.unlockWithKey(saved: saved, key: key) else { return }
-        await opened(s)
+        await opened(s, from: saved)
     }
 
     func unlock(password: String) async {
         guard let saved = SavedVault.load() else { return }
         do {
             let s = try await Task.detached { try VaultSession.unlock(saved: saved, password: password) }.value
-            await opened(s)
+            await opened(s, from: saved)
         } catch {
             self.error = message(error)
         }
     }
 
-    private func opened(_ s: VaultSession) async {
+    /// The saved vault as this extension opened or last wrote it: anything
+    /// else on disk was saved by the app meanwhile, and is merged in.
+    private var lastSaved: String?
+
+    private func opened(_ s: VaultSession, from saved: String) async {
         session = s
+        lastSaved = saved
         unlocked = true
         var seen = Set<String>()
         let siteMatches = services.flatMap { s.matches(url: $0) }.filter { seen.insert($0.id).inserted }
@@ -261,21 +266,51 @@ final class ExtensionModel: ObservableObject {
         context()?.completeRequest(withTextToInsert: text, completionHandler: nil)
     }
 
-    /// Saves the vault, and syncs it so a change made here (a new passkey,
-    /// a counter) reaches the app and other devices even if the app doesn't
-    /// run first.
-    private func saveAndSync(_ s: VaultSession) async {
-        let text = s.save()
-        try? SavedVault.store(text)
-        _ = try? await Task.detached { try s.sync() }.value
-        try? SavedVault.store(s.save())
+    /// Saves the vault (merged with what the app saved meanwhile), so the
+    /// change made here (a new passkey) is kept: throws if it can't be.
+    /// Then registers the suggestions again, so a new passkey is offered
+    /// above the keyboard at once, and syncs, so other devices get it even
+    /// if the app doesn't run first; but waits for the sync only briefly,
+    /// as the site is waiting too. A sync not done by then is left to the
+    /// app (the change is saved, and uploaded on its next sync).
+    private func saveAndSync(_ s: VaultSession) async throws {
+        let before = lastSaved
+        lastSaved = try await Task.detached { try SavedVault.write(s, lastSaved: before).text }.value
+        SuggestionStore.update(with: s.items())
+        if await Self.syncBriefly(s, seconds: 3) {
+            let before = lastSaved
+            if let text = try? await Task.detached(operation: { try SavedVault.write(s, lastSaved: before).text }).value {
+                lastSaved = text
+            }
+        }
+    }
+
+    /// Syncs, waiting at most `seconds`. False if it failed or is still
+    /// going (it then finishes in the background, and nothing more is saved
+    /// here).
+    private nonisolated static func syncBriefly(_ s: VaultSession, seconds: Double) async -> Bool {
+        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let lock = NSLock()
+            var resumed = false
+            let finish = { (ok: Bool) in
+                lock.lock()
+                defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                cont.resume(returning: ok)
+            }
+            DispatchQueue.global(qos: .userInitiated).async { finish((try? s.sync()) != nil) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { finish(false) }
+        }
     }
 
     func usePasskey(item: String, credential: Data) async {
         guard let s = session, let r = passkeyRequest else { return }
         do {
             let sig = try s.assertPasskey(itemId: item, credentialId: credential, rpId: r.rpId, clientDataHash: r.clientDataHash)
-            if s.hasUnsyncedChanges() { await saveAndSync(s) }
+            // A sign-in changes nothing that must be kept: it goes ahead
+            // even if saving fails.
+            if s.hasUnsyncedChanges() { try? await saveAndSync(s) }
             let answer = ASPasskeyAssertionCredential(
                 userHandle: sig.userHandle, relyingParty: r.rpId, signature: sig.signature, clientDataHash: r.clientDataHash,
                 authenticatorData: sig.authenticatorData, credentialID: sig.credentialId)
@@ -297,7 +332,9 @@ final class ExtensionModel: ObservableObject {
         defer { busy = false }
         do {
             let reg = try s.createPasskey(rpId: r.rpId, rpName: "", userHandle: r.userHandle, userName: r.userName, userDisplayName: r.userName, itemId: itemId)
-            await saveAndSync(s)
+            // Only a passkey that's kept is handed to the site: if it can't
+            // be saved, the site is told nothing was made.
+            try await saveAndSync(s)
             let answer = ASPasskeyRegistrationCredential(relyingParty: r.rpId, clientDataHash: r.clientDataHash, credentialID: reg.credentialId, attestationObject: reg.attestationObject)
             context()?.completeRegistrationRequest(using: answer, completionHandler: nil)
         } catch {

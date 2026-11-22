@@ -33,6 +33,26 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(lockedVault(saved: saved)?.settings, settings)
     }
 
+    /// The app and its AutoFill extension each take in what the other
+    /// saved, so neither's change is lost.
+    func testAbsorbKeepsBothSidesChanges() throws {
+        let app = try VaultSession.create(settings: settings, keys: keys, password: password)
+        let shared = try app.add(fields: login("Shared", "https://shared.com"))
+        let ext = try VaultSession.unlockWithKey(saved: app.save(), key: app.key())
+        let fromExt = try ext.add(fields: login("Ext", "https://ext.com"))
+        var f = try XCTUnwrap(app.get(id: shared)).fields
+        f.notes = "edited in the app"
+        XCTAssertTrue(try app.update(id: shared, fields: f))
+
+        XCTAssertGreaterThanOrEqual(try app.absorb(saved: ext.save()), 1)
+        XCTAssertNotNil(app.get(id: fromExt))
+        XCTAssertEqual(app.get(id: shared)?.fields.notes, "edited in the app")
+        XCTAssertEqual(try app.absorb(saved: app.save()), 0)
+
+        let other = try VaultSession.create(settings: settings, keys: keys, password: password)
+        XCTAssertThrowsError(try app.absorb(saved: other.save()))
+    }
+
     func testPasswordHistoryAndTrash() throws {
         let s = try VaultSession.create(settings: settings, keys: keys, password: password)
         let id = try s.add(fields: login("Example", "https://example.com", pw: "old"))

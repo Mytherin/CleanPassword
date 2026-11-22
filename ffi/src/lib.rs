@@ -467,6 +467,14 @@ impl VaultSession {
         self.v().save()
     }
 
+    /// Takes in what the other process (the app, or its AutoFill
+    /// extension) saved since this one last read or saved the vault, so
+    /// neither overwrites the other's changes. Returns how many items
+    /// changed.
+    pub fn absorb(&self, saved: String) -> R<u64> {
+        Ok(self.v().absorb(&saved)? as u64)
+    }
+
     /// The vault key, for the keychain (behind Face ID).
     pub fn key(&self) -> String {
         self.v().key_b64().to_string()
