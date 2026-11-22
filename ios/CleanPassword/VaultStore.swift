@@ -36,9 +36,11 @@ final class VaultStore: ObservableObject {
         SavedVault.load().flatMap { lockedVault(saved: $0) }?.vaultId
     }
 
-    func refreshPhase() {
+    /// `unlocked`: when known (locking), so as not to wait for the core's
+    /// queue, which a running sync holds.
+    func refreshPhase(unlocked: Bool? = nil) {
         if let saved = SavedVault.load(), let info = lockedVault(saved: saved) {
-            phase = Core.shared.isUnlocked ? .unlocked : .locked(info)
+            phase = (unlocked ?? Core.shared.isUnlocked) ? .unlocked : .locked(info)
             lastSync = info.lastSync.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         } else {
             phase = .setup
@@ -64,7 +66,7 @@ final class VaultStore: ObservableObject {
     func unlock(password: String) async throws {
         guard let saved = SavedVault.load() else { return refreshPhase() }
         let s = try await Core.shared.detached { try VaultSession.unlock(saved: saved, password: password) }
-        await opened(s)
+        await opened(s, from: saved)
     }
 
     /// Unlocks with the key in the keychain, after Face ID. False if that
@@ -73,12 +75,12 @@ final class VaultStore: ObservableObject {
         guard let saved = SavedVault.load(), let id = vaultId else { return false }
         let key = await Core.shared.detachedValue { BiometricKey.read(vaultId: id, reason: "Unlock CleanPassword") }
         guard let key, let s = try? await Core.shared.detached({ try VaultSession.unlockWithKey(saved: saved, key: key) }) else { return false }
-        await opened(s)
+        await opened(s, from: saved)
         return true
     }
 
-    private func opened(_ s: VaultSession) async {
-        await Core.shared.open(s)
+    private func opened(_ s: VaultSession, from saved: String? = nil) async {
+        await Core.shared.open(s, from: saved)
         try? await Core.shared.persist()
         phase = .unlocked
         await reload()
@@ -114,7 +116,12 @@ final class VaultStore: ObservableObject {
         let link: String
     }
     @Published var codeLink: CodeLink?
+    /// A link for the editor that's open (it takes it as the code).
+    @Published var editorCodeLink: String?
 
+    /// An `otpauth://` link: into the open editor (the user came back from
+    /// scanning the site's QR code with the Camera app), or into the
+    /// editor that's reopened after unlocking; else to choose a login for.
     func open(url: URL) {
         let text = url.absoluteString
         guard url.scheme?.lowercased() == "otpauth" else { return }
@@ -122,7 +129,14 @@ final class VaultStore: ObservableObject {
             notice = "That verification code link isn't valid."
             return
         }
-        codeLink = CodeLink(link: text)
+        if phase == .unlocked, let d = editing, d.edited.kind == .login {
+            editorCodeLink = text
+        } else if phase != .unlocked, var d = lockedDraft, d.edited.kind == .login {
+            d.edited.totp = text
+            lockedDraft = d
+        } else {
+            codeLink = CodeLink(link: text)
+        }
     }
 
     /// Whether the unlock screen starts Face ID by itself. Not right after
@@ -139,7 +153,7 @@ final class VaultStore: ObservableObject {
         items = []
         trash = []
         findings = []
-        refreshPhase()
+        refreshPhase(unlocked: false)
     }
 
     /// Removes the vault from this iPhone (not from S3).
@@ -151,10 +165,13 @@ final class VaultStore: ObservableObject {
         Core.shared.lock()
         SavedVault.remove()
         SuggestionStore.clear()
+        SiteIcons.clear()
+        codeLink = nil
+        editorCodeLink = nil
         items = []
         trash = []
         findings = []
-        refreshPhase()
+        refreshPhase(unlocked: false)
     }
 
     // MARK: Items
@@ -191,11 +208,13 @@ final class VaultStore: ObservableObject {
     private var syncAgain = false
 
     func sync() {
-        guard Core.shared.isUnlocked else { return }
+        // Not Core.shared.isUnlocked: that waits for the core's queue, which
+        // a running sync holds while it's on the network.
         guard !syncing else {
             syncAgain = true
             return
         }
+        guard phase == .unlocked else { return }
         syncing = true
         syncAgain = false
         Task {

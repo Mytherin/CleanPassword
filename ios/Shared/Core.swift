@@ -53,7 +53,7 @@ enum SavedVault {
             result = Result {
                 var absorbed: UInt64 = 0
                 if let disk = try? String(contentsOf: at, encoding: .utf8), disk != lastSaved {
-                    absorbed = try session.absorb(saved: disk)
+                    absorbed = try session.absorb(saved: disk, ancestor: lastSaved)
                 }
                 let text = session.save()
                 try Data(text.utf8).write(to: at, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
@@ -102,10 +102,13 @@ final class Core: @unchecked Sendable {
         }
     }
 
-    func open(_ s: VaultSession) async {
+    /// Opens `s`, unlocked from the saved vault `saved` (what this process
+    /// last read, so what both it and the AutoFill extension started from).
+    func open(_ s: VaultSession, from saved: String? = nil) async {
         await withCheckedContinuation { cont in
             queue.async {
                 self.session = s
+                if let saved { self.lastSaved = saved }
                 cont.resume()
             }
         }

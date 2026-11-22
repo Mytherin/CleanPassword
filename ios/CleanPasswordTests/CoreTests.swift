@@ -44,13 +44,13 @@ final class CoreTests: XCTestCase {
         f.notes = "edited in the app"
         XCTAssertTrue(try app.update(id: shared, fields: f))
 
-        XCTAssertGreaterThanOrEqual(try app.absorb(saved: ext.save()), 1)
+        XCTAssertGreaterThanOrEqual(try app.absorb(saved: ext.save(), ancestor: nil), 1)
         XCTAssertNotNil(app.get(id: fromExt))
         XCTAssertEqual(app.get(id: shared)?.fields.notes, "edited in the app")
-        XCTAssertEqual(try app.absorb(saved: app.save()), 0)
+        XCTAssertEqual(try app.absorb(saved: app.save(), ancestor: nil), 0)
 
         let other = try VaultSession.create(settings: settings, keys: keys, password: password)
-        XCTAssertThrowsError(try app.absorb(saved: other.save()))
+        XCTAssertThrowsError(try app.absorb(saved: other.save(), ancestor: nil))
     }
 
     func testPasswordHistoryAndTrash() throws {

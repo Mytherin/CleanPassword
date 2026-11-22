@@ -55,15 +55,33 @@ actor SiteIcons {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("SiteIcons", isDirectory: true)
     }
 
-    /// Forgets every icon (icons turned off).
+    /// Forgets every icon (icons turned off, or the vault removed).
     static func clear() {
         try? FileManager.default.removeItem(at: directory)
+        Task { await shared.forgetLoaded() }
+    }
+
+    private func forgetLoaded() {
+        memory = [:]
+        missing = []
+    }
+
+    /// Whether icons are fetched for the host: public names only, not IP
+    /// addresses, single-label (intranet) names or .local ones, and plain
+    /// enough to be file names here.
+    static func fetchable(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2, labels.allSatisfy({ !$0.isEmpty }),
+              host.allSatisfy({ ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "." || $0 == "-" }),
+              let last = labels.last, last.contains(where: \.isLetter),
+              !["local", "localhost", "lan", "home", "internal", "corp", "intranet"].contains(String(last))
+        else { return false }
+        return true
     }
 
     func icon(for host: String) async -> UIImage? {
         let key = host.lowercased()
-        // Only plain host names (they're file names here).
-        guard !key.isEmpty, key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }), !key.hasPrefix(".") else { return nil }
+        guard Self.fetchable(key) else { return nil }
         if let image = memory[key] { return image }
         if missing.contains(key) { return nil }
         if let task = inFlight[key] { return await task.value }
@@ -85,18 +103,23 @@ actor SiteIcons {
             return nil
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var answered = true
         for path in ["/apple-touch-icon.png", "/apple-touch-icon-precomposed.png", "/favicon.ico"] {
             guard let url = URL(string: "https://\(host)\(path)") else { continue }
             let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
-            guard let (data, response) = try? await session.data(for: request),
-                  (response as? HTTPURLResponse)?.statusCode == 200,
-                  data.count < 1_000_000,
+            guard let (data, response) = try? await session.data(for: request) else {
+                // Offline, or the site is down: try again another time.
+                answered = false
+                continue
+            }
+            guard (response as? HTTPURLResponse)?.statusCode == 200, data.count < 1_000_000,
                   let image = UIImage(data: data), image.size.width >= 16
             else { continue }
             try? image.pngData()?.write(to: file, options: .atomic)
             return image
         }
-        FileManager.default.createFile(atPath: none.path, contents: nil)
+        // The site answered, without an icon: not asked again for a week.
+        if answered { FileManager.default.createFile(atPath: none.path, contents: nil) }
         return nil
     }
 }

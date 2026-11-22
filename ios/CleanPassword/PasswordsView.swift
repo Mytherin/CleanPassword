@@ -58,6 +58,18 @@ struct PasswordsView: View {
         .sheet(isPresented: $showGenerator) {
             NavigationStack { GeneratorView() }
         }
+        // Only one sheet shows at a time: a code link that arrives over
+        // Settings or the generator closes it, then shows.
+        .onChange(of: store.codeLink?.id) { _, id in
+            guard id != nil, showSettings || showGenerator, let link = store.codeLink else { return }
+            store.codeLink = nil
+            showSettings = false
+            showGenerator = false
+            Task {
+                try? await Task.sleep(for: .milliseconds(600))
+                store.codeLink = link
+            }
+        }
     }
 
     private var overview: some View {

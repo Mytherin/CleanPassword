@@ -11,9 +11,12 @@ import SwiftUI
 struct ItemEditView: View {
     @EnvironmentObject private var store: VaultStore
     @Environment(\.dismiss) private var dismiss
-    let itemId: String?
+    // State, set once: the view is made again whenever the store publishes
+    // (the item synced from another device), and these must stay as they
+    // were when editing began.
+    @State private var itemId: String?
     /// The fields as they were when editing began.
-    private let original: ItemFields
+    @State private var original: ItemFields
     @State private var f: ItemFields
     @State private var websites: [Site]
     @State private var custom: [Field]
@@ -38,13 +41,12 @@ struct ItemEditView: View {
     @AppStorage("recipe") private var recipeData = Data()
 
     init(item: VaultItem?, draft: VaultStore.Draft? = nil) {
-        itemId = draft?.itemId ?? item?.id
-        original = draft?.original ?? item?.fields ?? .empty()
+        _itemId = State(initialValue: draft?.itemId ?? item?.id)
+        _original = State(initialValue: draft?.original ?? item?.fields ?? .empty())
         let fields = draft?.edited ?? item?.fields ?? .empty()
         _f = State(initialValue: fields)
         _websites = State(initialValue: fields.websites.isEmpty ? [Site(uri: "")] : fields.websites.map { Site(uri: $0.uri, matching: $0.matching) })
         _custom = State(initialValue: fields.fields.map { Field(name: $0.name, value: $0.value, hidden: $0.hidden) })
-        _showPassword = State(initialValue: draft != nil && item == nil)
     }
 
     var body: some View {
@@ -154,13 +156,13 @@ struct ItemEditView: View {
             }
         }
         .sheet(isPresented: $scanning) {
-            CodeScannerView { code in
-                f.totp = code
-                // A new login takes its name and user name from the code.
-                let label = CodeScannerView.label(of: code)
-                if f.name.trimmingCharacters(in: .whitespaces).isEmpty, let issuer = label.issuer { f.name = issuer }
-                if f.username.isEmpty, let account = label.account { f.username = account }
-            }
+            CodeScannerView { useCode($0) }
+        }
+        // A code QR scanned with the Camera app while this was open.
+        .onChange(of: store.editorCodeLink) { _, link in
+            guard let link else { return }
+            store.editorCodeLink = nil
+            useCode(link)
         }
         .onAppear { keepDraft() }
         .onChange(of: f) { _, _ in keepDraft() }
@@ -226,6 +228,15 @@ struct ItemEditView: View {
         return fields
     }
 
+    /// Sets up a scanned code; a new login takes its name and user name from
+    /// it.
+    private func useCode(_ code: String) {
+        f.totp = code
+        let label = CodeScannerView.label(of: code)
+        if f.name.trimmingCharacters(in: .whitespaces).isEmpty, let issuer = label.issuer { f.name = issuer }
+        if f.username.isEmpty, let account = label.account { f.username = account }
+    }
+
     private func keepDraft() {
         store.editing = VaultStore.Draft(itemId: itemId, original: original, edited: composed())
     }
@@ -245,6 +256,10 @@ struct ItemEditView: View {
         var fields = composed()
         if let id = itemId, let current = store.items.first(where: { $0.id == id })?.fields {
             fields = Self.rebase(edited: fields, original: original, onto: current)
+            // A note has no login fields, whatever was synced into them.
+            if fields.kind == .note {
+                (fields.username, fields.password, fields.websites, fields.totp) = ("", "", [], "")
+            }
         }
         do {
             _ = try await store.save(id: itemId, fields: fields)

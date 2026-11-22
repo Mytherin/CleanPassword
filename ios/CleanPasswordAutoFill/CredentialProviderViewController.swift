@@ -125,6 +125,9 @@ final class ExtensionModel: ObservableObject {
         var label: String
         var text: String
         var hidden: Bool
+        /// A verification code: made again when it's picked, as the one
+        /// shown may have expired meanwhile.
+        var codeOf: String?
         var id: String { label }
     }
 
@@ -207,6 +210,9 @@ final class ExtensionModel: ObservableObject {
                 if #available(iOS 18.0, *) { return fail(.matchedExcludedCredential) }
                 error = "You already have a passkey for this account on \(r.rpId)."
             }
+            // Now, not as the form draws: after saving, a sync that's still
+            // going holds the vault.
+            if let r = registration { registrationLogins = s.siteLogins(url: r.rpId).filter { !$0.related } }
         case .list, .configured:
             if let w = wantedPasskey {
                 return await usePasskey(item: w.item, credential: w.credential)
@@ -251,7 +257,9 @@ final class ExtensionModel: ObservableObject {
         }
         add("User Name", f.username)
         add("Password", f.password, hidden: true)
-        if !f.totp.isEmpty, let code = session?.totp(id: item.id) { add("Verification Code", code.code) }
+        if !f.totp.isEmpty, let code = session?.totp(id: item.id) {
+            out.append(Value(label: "Verification Code", text: code.code, hidden: false, codeOf: item.id))
+        }
         for (n, site) in f.websites.enumerated() { add(n == 0 ? "Website" : "Website \(n + 1)", site.uri) }
         for field in f.fields { add(field.name.isEmpty ? "Field" : field.name, field.value, hidden: field.hidden) }
         add("Notes", f.notes)
@@ -260,9 +268,10 @@ final class ExtensionModel: ObservableObject {
         return out.filter { seen.insert($0.label).inserted }
     }
 
-    /// Types the text into the field the menu was opened from.
-    func insert(_ text: String) {
+    /// Types the value into the field the menu was opened from.
+    func insert(_ value: Value) {
         guard #available(iOS 18.0, *) else { return }
+        let text = value.codeOf.flatMap { session?.totp(id: $0)?.code } ?? value.text
         context()?.completeRequest(withTextToInsert: text, completionHandler: nil)
     }
 
@@ -347,10 +356,7 @@ final class ExtensionModel: ObservableObject {
     }
 
     /// The logins a new passkey can go on.
-    var registrationLogins: [SuggestedLogin] {
-        guard let r = registration, let s = session else { return [] }
-        return s.siteLogins(url: r.rpId).filter { !$0.related }
-    }
+    @Published var registrationLogins: [SuggestedLogin] = []
 
     func savePasskey(on itemId: String?) async {
         guard let s = session, let r = registration else { return }
@@ -592,7 +598,7 @@ struct ExtensionView: View {
                     row(name: i.fields.name, user: i.fields.username, note: nil) { model.pickCode(i.id) }
                 }
             }
-            if model.all.isEmpty {
+            if model.all.isEmpty && model.error == nil {
                 Text("None of your logins has a verification code. Add its setup key in the CleanPassword app.").foregroundStyle(.secondary)
             }
             if let e = model.error { Section { Text(e).foregroundStyle(.red) } }
@@ -633,7 +639,7 @@ struct ExtensionView: View {
             }
             ForEach(values) { v in
                 Button {
-                    model.insert(v.text)
+                    model.insert(v)
                 } label: {
                     VStack(alignment: .leading) {
                         Text(v.label).font(.subheadline).foregroundStyle(.secondary)

@@ -32,7 +32,7 @@ use zeroize::Zeroizing;
 use crate::crypto;
 use crate::item::{merge, Item};
 use crate::s3::{Client, Cond, Put, Transport};
-use crate::vault::{AwsCredentials, S3Config, Secrets, Vault, VaultHeader};
+use crate::vault::{AwsCredentials, S3Config, Vault, VaultHeader};
 use crate::{Error, Result};
 
 pub const HEADER_OBJECT: &str = "vault.json";
@@ -274,33 +274,56 @@ impl Vault {
     /// one last read or saved it (the iPhone app and its AutoFill extension
     /// share one saved copy), so neither overwrites the other's changes.
     ///
-    /// Items are merged three-way, as in a sync, from the older of the two
-    /// synced copies. What was last synced (the synced copy, the ETags, the
-    /// header, when) comes from the side that synced more recently: the
-    /// saved copy if neither did. A master password changed here and not
-    /// uploaded yet is kept. Returns how many items changed here.
-    pub fn absorb(&mut self, saved: &str) -> Result<usize> {
-        let other = Vault::unlock_with_key(saved, &self.key_b64())?;
+    /// `ancestor` is the copy this process last read or saved, which both
+    /// sides started from. Items, the access key, the S3 settings and the
+    /// header changed here since then are kept; changed only on the other
+    /// side, they take its version; items changed on both are merged as in
+    /// a sync. Without an ancestor (or one that can't be opened), the older
+    /// of the two synced copies stands in for it, and settings come from the
+    /// side that synced last (but a master password changed here and not
+    /// uploaded yet is kept). What was last synced (the synced copy, the
+    /// ETags, when) always comes from the side that synced more recently.
+    /// Returns how many items changed here.
+    pub fn absorb(&mut self, saved: &str, ancestor: Option<&str>) -> Result<usize> {
+        let key = self.key_b64();
+        let other = Vault::unlock_with_key(saved, &key)?;
         if other.header.vault_id != self.header.vault_id {
             return Err(Error::DifferentVault);
         }
-        let before = std::mem::take(&mut self.s.items);
+        let anc = ancestor.and_then(|a| Vault::unlock_with_key(a, &key).ok()).filter(|a| a.header.vault_id == self.header.vault_id);
         let theirs_newer = other.last_sync >= self.last_sync;
+
+        let before = std::mem::take(&mut self.s.items);
         let mut merged = BTreeSet::new();
-        let base = if theirs_newer { &self.s.base } else { &other.s.base };
+        let base = match &anc {
+            Some(a) => &a.s.items,
+            None if theirs_newer => &self.s.base,
+            None => &other.s.base,
+        };
         let items = merge_vault(base, &before, &other.s.items, &mut merged);
+
+        let (keep_credentials, keep_config, keep_header) = match &anc {
+            Some(a) => (self.s.credentials != a.s.credentials, self.config != a.config, self.header != a.header),
+            None => (!theirs_newer, !theirs_newer, !theirs_newer || (self.s.header_dirty && !other.s.header_dirty)),
+        };
+        let Vault { config, header, s: theirs, last_sync, .. } = other;
         if theirs_newer {
-            let Vault { config, header, s, last_sync, .. } = other;
-            if !(self.s.header_dirty && !s.header_dirty) {
-                self.header = header;
-            }
-            let header_dirty = self.s.header_dirty || s.header_dirty;
-            self.config = config;
+            self.s.base = theirs.base;
+            self.s.etag = theirs.etag;
+            self.s.header_etag = theirs.header_etag;
             self.last_sync = last_sync;
-            self.s = Secrets { items, header_dirty, ..s };
-        } else {
-            self.s.items = items;
         }
+        if !keep_credentials {
+            self.s.credentials = theirs.credentials;
+        }
+        if !keep_config {
+            self.config = config;
+        }
+        if !keep_header {
+            self.header = header;
+            self.s.header_dirty = theirs.header_dirty;
+        }
+        self.s.items = items;
         Ok(changed(&before, &self.s.items))
     }
 }
@@ -354,7 +377,7 @@ mod tests {
         d.notes = "edited in the app".into();
         app.update(&shared, d).unwrap();
 
-        assert_eq!(app.absorb(&ext.save()).unwrap(), 1);
+        assert_eq!(app.absorb(&ext.save(), None).unwrap(), 1);
         assert!(app.get(&from_ext).is_some(), "the extension's item is kept");
         assert_eq!(app.get(&shared).unwrap().notes, "edited in the app", "and so is the app's edit");
         assert_eq!(app.last_sync(), ext.last_sync(), "the newer sync is adopted");
@@ -365,18 +388,57 @@ mod tests {
         // app's newer copy, and a delete made there.
         app.delete(&from_ext).unwrap();
         app.purge(&from_ext).unwrap();
-        assert!(ext.absorb(&app.save()).unwrap() >= 2);
+        assert!(ext.absorb(&app.save(), None).unwrap() >= 2);
         assert!(ext.get(&from_ext).is_none());
         assert_eq!(ext.get(&shared).unwrap().notes, "edited in the app");
 
         // An identical copy changes nothing.
         let same = app.save();
-        assert_eq!(app.absorb(&same).unwrap(), 0);
+        assert_eq!(app.absorb(&same, None).unwrap(), 0);
         assert!(app.has_unsynced_changes());
 
         // Another vault's copy is refused.
         let other = Vault::create(config(), creds(), PW).unwrap();
-        assert!(app.absorb(&other.save()).is_err());
+        assert!(app.absorb(&other.save(), None).is_err());
+    }
+
+    /// With the copy both started from, what changed on each side is known:
+    /// a new access key isn't lost to a copy that synced later, and an item
+    /// purged here doesn't come back from the other side.
+    #[test]
+    fn absorb_with_ancestor() {
+        let (s3, mut app, _) = setup();
+        let start = app.save();
+        let mut ext = Vault::unlock_with_key(&start, &app.key_b64()).unwrap();
+
+        // The app gets a new access key (its sync fails meanwhile); the
+        // extension, with the old key, syncs a new login.
+        let rotated = AwsCredentials { access_key_id: "AKIANEW".into(), secret_access_key: "new".into(), session_token: None };
+        app.set_credentials(rotated.clone()).unwrap();
+        let from_ext = ext.add(login("Ext", "https://ext.com", "me", "pw1")).unwrap();
+        block_on(ext.sync(&s3)).unwrap();
+
+        assert_eq!(app.absorb(&ext.save(), Some(&start)).unwrap(), 1);
+        assert_eq!(app.credentials().access_key_id, "AKIANEW", "the new key is kept");
+        assert_eq!(app.last_sync(), ext.last_sync());
+        assert!(app.get(&from_ext).is_some());
+
+        // The extension takes in the app's key, as it didn't change its own.
+        let app_saved = app.save();
+        ext.absorb(&app_saved, Some(&ext.save())).unwrap();
+        assert_eq!(ext.credentials().access_key_id, "AKIANEW");
+
+        // An item made and saved, then purged here while the other side
+        // (which has it) saves something else: it stays purged.
+        let tmp = app.add(login("Tmp", "https://tmp.com", "me", "pw2")).unwrap();
+        let shared = app.save();
+        let mut ext = Vault::unlock_with_key(&shared, &app.key_b64()).unwrap();
+        app.delete(&tmp).unwrap();
+        app.purge(&tmp).unwrap();
+        ext.add(login("Other", "https://other.com", "me", "pw3")).unwrap();
+        app.absorb(&ext.save(), Some(&shared)).unwrap();
+        assert!(app.get(&tmp).is_none(), "a purged item doesn't come back");
+        assert!(app.items().iter().any(|i| i.name == "Other"));
     }
 
     #[test]

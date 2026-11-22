@@ -50,7 +50,7 @@ struct CodeScannerView: View {
 
     private func finish(_ text: String) {
         guard !done else { return }
-        guard isValidTotp(secret: text) else {
+        guard text.lowercased().hasPrefix("otpauth://"), isValidTotp(secret: text) else {
             error = "That QR code isn't for setting up a verification code."
             return
         }
@@ -68,7 +68,7 @@ struct CodeScannerView: View {
         }
         let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])
         let codes = (detector?.features(in: image) ?? []).compactMap { ($0 as? CIQRCodeFeature)?.messageString }
-        if let code = codes.first(where: { isValidTotp(secret: $0) }) {
+        if let code = codes.first(where: { $0.lowercased().hasPrefix("otpauth://") && isValidTotp(secret: $0) }) {
             finish(code)
         } else {
             error = codes.isEmpty ? "There's no QR code in that image." : "That QR code isn't for setting up a verification code."
