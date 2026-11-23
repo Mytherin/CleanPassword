@@ -30,8 +30,8 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
   - Bitwarden JSON, including **password-protected exports**, which are decrypted in the core so no plaintext copy of the vault needs to touch the disk. **Passkeys come along.** Importing the same export again adds any passkeys missing from logins imported earlier.
   - Bitwarden CSV.
   - CSV from Chrome, Edge, Safari/Apple Passwords, Firefox, 1Password and LastPass.
-- **Export:** unencrypted Bitwarden JSON, which most password managers import.
-- **Master password change:** other devices pick up the new password at their next sync.
+- **Export:** unencrypted Bitwarden JSON, which most password managers import. It asks for the master password first.
+- **Master password change:** a new vault key comes with it, so the old password (or a key taken from a device) can't read what's saved from then on. Other devices learn of it at their next sync, lock, and move to the new key when unlocked with the new password.
 
 ### Chrome extension
 
@@ -47,7 +47,7 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
   - When a site creates a passkey or signs in with one, CleanPassword asks in a window of its own, which the page can't cover or click into. There you can save the passkey, choose one, or **use another device or security key**, which hands over to Chrome's own passkeys.
   - Sites that offer passkeys in their sign-in field get them in the inline menu.
   - Requests CleanPassword can't serve go to Chrome as if it weren't installed: embedded frames, keys other than P-256, and sites it has no passkey for.
-- **Shortcuts:** Ctrl+Shift+L (⌘⇧L) fills the best login, Ctrl+Shift+9 fills a strong password, Ctrl+Shift+Y opens the popup. The right-click menu offers the same.
+- **Shortcuts:** Ctrl+Shift+L (⌘⇧L) fills the best login saved for the page's own host, Ctrl+Shift+9 fills a strong password, Ctrl+Shift+Y opens the popup. The right-click menu offers the same.
 - **Auto-lock** after 15 minutes without use (configurable), and when the computer locks.
 
 ### iPhone app
@@ -84,15 +84,16 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 
 | Where | What it holds |
 |---|---|
-| **S3** (`<folder>/vault.json`) | Vault id, Argon2id settings and salt, and the **vault key** sealed with the master key. |
+| **S3** (`<folder>/vault.json`) | Vault id, Argon2id settings and salt, the **vault key** sealed with the master key, earlier vault keys sealed with it, and an HMAC with the vault key over all of it. |
 | **S3** (`<folder>/vault.bin`) | Every item, sealed together with the vault key, padded to blocks of 16 KiB (or an eighth of its size, for a large vault). |
-| **Each device** (`chrome.storage.local`, or a file in the iOS App Group) | The S3 settings and `vault.json` in clear. Everything else is sealed with the vault key: the **AWS access key**, the items, and sync state. |
+| **Each device** (the extension's IndexedDB, out of content scripts' reach; or a file in the iOS App Group, protected while the phone is locked) | The S3 settings and `vault.json` in clear. Everything else is sealed with the vault key: the **AWS access key**, the items, and sync state. |
 | **Chrome, while unlocked** | The vault key in `chrome.storage.session`: memory only, not readable by content scripts. Removed when the vault locks. |
 | **iPhone, with Face ID on** | The vault key in the keychain, `ThisDeviceOnly` and `biometryCurrentSet`. |
 
 **Keys.**
 - **Master key:** Argon2id of the master password, with 46 MiB memory, 3 passes and 1 lane. That's above OWASP's recommendation and fits iOS's AutoFill memory limit. The settings are stored with the vault, so they can be raised later.
-- **Vault key:** 32 random bytes, wrapped by the master key. Changing the master password re-wraps this one key instead of re-encrypting everything.
+- **Vault key:** 32 random bytes, wrapped by the master key. Changing the master password makes a new one (and seals `vault.bin` again with it); `vault.json` keeps the last few earlier keys sealed with the new one, so a device that last unlocked before the change can still open what it kept, once it's unlocked with the new password.
+- **Passkeys** tell sites the user was verified (the UV flag) only when they were: on the iPhone, Face ID, a PIN or the master password; in Chrome, the master password entered in the last two minutes, which a site that requires verification gets asked for.
 
 **Encryption.** Everything is sealed with XChaCha20-Poly1305 and a random nonce. The associated data names the vault (and what's sealed), so ciphertexts can't be moved between vaults. Keys are wiped from memory when dropped.
 
@@ -102,8 +103,10 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 
 They never see names, websites, user names or passwords.
 
+**What someone able to write to the bucket can't do** (a leaked IAM key, say): replace `vault.json` (it's signed with the vault key, and a "new master password" that isn't genuine never unlocks), or put back an older `vault.json` or `vault.bin` (each carries a counter that never goes back; an older copy is replaced, not merged as if items had been deleted).
+
 Limits that can't be avoided without a server:
-- Whoever controls the bucket can delete the vault or serve an older version of it.
+- Whoever controls the bucket can delete the vault (devices put their copy back), or serve an older version of it to a device that has never synced.
 - An HTTPS man-in-the-middle with a trusted certificate could do the same.
 
 They can't read or forge items. Every device keeps a full copy, and a sync never takes a missing `vault.bin` to mean the items were deleted. Turn on **S3 versioning** too, so an overwritten vault can be restored.

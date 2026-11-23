@@ -152,7 +152,7 @@ impl Session {
         Vault::unlock_with_key(saved, key).map(session).map_err(err)
     }
 
-    /// The string to keep in `chrome.storage.local` (all secrets sealed).
+    /// The string to keep between sessions (all secrets sealed).
     pub fn save(&self) -> JsResult<String> {
         self.with(|v| v.save())
     }

@@ -5,8 +5,8 @@
 //!   AutoFill extensions, which get little memory). The costs and the random
 //!   salt are stored with the vault, so they can be raised later.
 //! - **Vault key:** 32 random bytes that encrypt every item. It's stored
-//!   only wrapped (encrypted) by the master key, so changing the master
-//!   password re-wraps one key instead of re-encrypting the vault.
+//!   only wrapped (encrypted) by the master key; changing the master
+//!   password makes a new one (see `VaultHeader::previous_keys`).
 //! - **Sealing:** XChaCha20-Poly1305 with a random 24-byte nonce
 //!   (`nonce ‖ ciphertext ‖ tag`). Every sealed thing carries associated
 //!   data naming what it is (the vault, the item id), so ciphertexts can't
