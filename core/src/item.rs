@@ -13,13 +13,73 @@ use serde_json::{Map, Value};
 pub enum ItemKind {
     #[default]
     Login,
-    /// A secure note (also what cards, identities and SSH keys from other
+    /// A secure note (also what SSH keys and other types from other
     /// password managers become, with their details as fields).
     Note,
     /// A Wi-Fi network, as in Apple's Passwords: `name` is the network's
     /// name and `password` its password. Never offered on websites, nor
     /// audited.
     Wifi,
+    /// A payment card: its details are fields named as in [`CARD_DETAILS`].
+    Card,
+    /// An identity (name, address, contact, documents): fields named as in
+    /// [`IDENTITY_DETAILS`].
+    Identity,
+}
+
+/// One detail of a card or an identity: its key in Bitwarden's format, the
+/// label of the item field it's kept in, and whether it's shown as dots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Detail {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub hidden: bool,
+}
+
+const fn detail(key: &'static str, label: &'static str, hidden: bool) -> Detail {
+    Detail { key, label, hidden }
+}
+
+pub const CARD_DETAILS: &[Detail] = &[
+    detail("cardholderName", "Cardholder name", false),
+    detail("brand", "Brand", false),
+    detail("number", "Number", true),
+    detail("expMonth", "Expiry month", false),
+    detail("expYear", "Expiry year", false),
+    detail("code", "Security code", true),
+];
+
+pub const IDENTITY_DETAILS: &[Detail] = &[
+    detail("title", "Title", false),
+    detail("firstName", "First name", false),
+    detail("middleName", "Middle name", false),
+    detail("lastName", "Last name", false),
+    detail("company", "Company", false),
+    detail("email", "Email", false),
+    detail("phone", "Phone", false),
+    detail("address1", "Address line 1", false),
+    detail("address2", "Address line 2", false),
+    detail("address3", "Address line 3", false),
+    detail("city", "City", false),
+    detail("state", "State or province", false),
+    detail("postalCode", "Postal code", false),
+    detail("country", "Country", false),
+    detail("username", "User name", false),
+    detail("ssn", "Social security number", true),
+    detail("passportNumber", "Passport number", true),
+    detail("licenseNumber", "License number", true),
+];
+
+impl ItemKind {
+    /// The details items of this kind have (none but for cards and
+    /// identities).
+    pub fn details(self) -> &'static [Detail] {
+        match self {
+            ItemKind::Card => CARD_DETAILS,
+            ItemKind::Identity => IDENTITY_DETAILS,
+            _ => &[],
+        }
+    }
 }
 
 /// How a saved website address is matched against a page (Bitwarden's

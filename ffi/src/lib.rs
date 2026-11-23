@@ -101,6 +101,10 @@ pub enum Kind {
     Note,
     /// A Wi-Fi network: its name is the item's, with its password.
     Wifi,
+    /// A payment card (details as fields: see `item_details`).
+    Card,
+    /// An identity (details as fields: see `item_details`).
+    Identity,
 }
 
 /// How a website is matched (Bitwarden's options).
@@ -315,6 +319,8 @@ impl From<ItemFields> for ItemData {
                 Kind::Login => ItemKind::Login,
                 Kind::Note => ItemKind::Note,
                 Kind::Wifi => ItemKind::Wifi,
+                Kind::Card => ItemKind::Card,
+                Kind::Identity => ItemKind::Identity,
             },
             name: f.name,
             username: f.username,
@@ -337,6 +343,8 @@ fn item_record(i: &Item) -> VaultItem {
                 ItemKind::Login => Kind::Login,
                 ItemKind::Note => Kind::Note,
                 ItemKind::Wifi => Kind::Wifi,
+                ItemKind::Card => Kind::Card,
+                ItemKind::Identity => Kind::Identity,
             },
             name: i.name.clone(),
             username: i.username.clone(),
@@ -664,6 +672,25 @@ pub fn locked_vault(saved: String) -> Option<LockedVault> {
     vault::locked_info(&saved).ok().map(|i| LockedVault { settings: (&i.config).into(), vault_id: i.vault_id, last_sync: i.last_sync.map(secs) })
 }
 
+
+/// One detail a card or identity has: kept in the item field named `label`.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct DetailSpec {
+    pub label: String,
+    pub hidden: bool,
+}
+
+/// The details items of a kind have, in the order they're shown (none but
+/// for cards and identities).
+#[uniffi::export]
+pub fn item_details(kind: Kind) -> Vec<DetailSpec> {
+    let kind = match kind {
+        Kind::Card => ItemKind::Card,
+        Kind::Identity => ItemKind::Identity,
+        _ => return Vec::new(),
+    };
+    kind.details().iter().map(|d| DetailSpec { label: d.label.into(), hidden: d.hidden }).collect()
+}
 #[uniffi::export]
 pub fn generate_password(recipe: PasswordRecipe) -> R<String> {
     let r = match recipe {

@@ -135,4 +135,24 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(WifiQR.payload(network: "Cafe", password: ""), "WIFI:T:nopass;S:Cafe;;")
         XCTAssertNotNil(WifiQR.image(network: "Cafe", password: "x"))
     }
+
+    /// Cards and identities: their details come from the core, and are
+    /// kept as the item's fields.
+    func testCardsAndIdentities() throws {
+        let card = itemDetails(kind: .card)
+        XCTAssertEqual(card.first?.label, "Cardholder name")
+        XCTAssertTrue(card.contains { $0.label == "Number" && $0.hidden })
+        XCTAssertTrue(itemDetails(kind: .identity).contains { $0.label == "Email" })
+        XCTAssertTrue(itemDetails(kind: .login).isEmpty)
+
+        let s = try VaultSession.create(settings: settings, keys: keys, password: password)
+        var f = ItemFields.empty(kind: .card)
+        f.name = "Visa"
+        f.fields = [CustomField(name: "Number", value: "4111 1111 1111 1234", hidden: true)]
+        let id = try s.add(fields: f)
+        let item = try XCTUnwrap(s.get(id: id))
+        XCTAssertEqual(item.fields.kind, .card)
+        XCTAssertEqual(ItemRow(item: item).subtitle, "Card •••• 1234")
+        XCTAssertTrue(s.matches(url: "https://visa.com").isEmpty)
+    }
 }

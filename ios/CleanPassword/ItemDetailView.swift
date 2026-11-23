@@ -122,7 +122,7 @@ struct ItemDetailView: View {
                 }
             }
             if !f.fields.isEmpty {
-                Section("Fields") {
+                Section(f.kind == .card ? "Card" : f.kind == .identity ? "Identity" : "Fields") {
                     ForEach(Array(f.fields.enumerated()), id: \.offset) { n, c in
                         if c.hidden {
                             secretRow(c.name, c.value, shown: revealedFields.contains(n), key: "field\(n)", mono: false) { revealedFields.formSymmetricDifference([n]) }
@@ -146,7 +146,7 @@ struct ItemDetailView: View {
                 }
             }
             Section {
-                Button(f.kind == .note ? "Delete Note" : f.kind == .wifi ? "Delete Network" : "Delete Password", role: .destructive) { confirmDelete = true }
+                Button(Self.deleteTitle(f.kind), role: .destructive) { confirmDelete = true }
             }
         }
         .listStyle(.insetGrouped)
@@ -222,6 +222,16 @@ struct ItemDetailView: View {
         .contextMenu {
             Button { copySecret(value) } label: { Label("Copy \(label)", systemImage: "doc.on.doc") }
             Button(action: toggle) { Label(shown ? "Hide" : "Show", systemImage: shown ? "eye.slash" : "eye") }
+        }
+    }
+
+    static func deleteTitle(_ kind: Kind) -> String {
+        switch kind {
+        case .login: return "Delete Password"
+        case .note: return "Delete Note"
+        case .wifi: return "Delete Network"
+        case .card: return "Delete Card"
+        case .identity: return "Delete Identity"
         }
     }
 

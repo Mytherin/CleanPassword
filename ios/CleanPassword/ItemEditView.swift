@@ -20,6 +20,9 @@ struct ItemEditView: View {
     @State private var f: ItemFields
     @State private var websites: [Site]
     @State private var custom: [Field]
+    /// A card's or identity's details, by label (the item fields they're
+    /// kept in).
+    @State private var details: [String: String]
 
     struct Site: Identifiable {
         let id = UUID()
@@ -46,7 +49,21 @@ struct ItemEditView: View {
         let fields = draft?.edited ?? item?.fields ?? .empty()
         _f = State(initialValue: fields)
         _websites = State(initialValue: fields.websites.isEmpty ? [Site(uri: "")] : fields.websites.map { Site(uri: $0.uri, matching: $0.matching) })
-        _custom = State(initialValue: fields.fields.map { Field(name: $0.name, value: $0.value, hidden: $0.hidden) })
+        let labels = Set(itemDetails(kind: fields.kind).map(\.label))
+        _custom = State(initialValue: fields.fields.filter { !labels.contains($0.name) }.map { Field(name: $0.name, value: $0.value, hidden: $0.hidden) })
+        _details = State(initialValue: Dictionary(fields.fields.filter { labels.contains($0.name) }.map { ($0.name, $0.value) }, uniquingKeysWith: { a, _ in a }))
+    }
+
+    private static let numeric: Set<String> = ["Number", "Expiry month", "Expiry year", "Security code"]
+
+    private var kindName: String {
+        switch f.kind {
+        case .login: return "login"
+        case .note: return "note"
+        case .wifi: return "Wi-Fi network"
+        case .card: return "card"
+        case .identity: return "identity"
+        }
     }
 
     var body: some View {
@@ -56,6 +73,8 @@ struct ItemEditView: View {
                     Text("Login").tag(Kind.login)
                     Text("Secure Note").tag(Kind.note)
                     Text("Wi-Fi Network").tag(Kind.wifi)
+                    Text("Card").tag(Kind.card)
+                    Text("Identity").tag(Kind.identity)
                 }
                 TextField(f.kind == .wifi ? "Network name" : "Name", text: $f.name)
                     .autocorrectionDisabled(f.kind == .wifi)
@@ -63,10 +82,21 @@ struct ItemEditView: View {
                 if f.kind != .login && original.kind == .login && hasLoginFields {
                     Text(f.kind == .wifi
                         ? "The user name, websites and verification code are removed when you save it as a Wi-Fi network."
-                        : "The user name, password, websites and verification code are removed when you save it as a note.")
+                        : "The user name, password, websites and verification code are removed when you save it as a \(kindName).")
                 }
             }
-            if f.kind != .note {
+            if f.kind == .card || f.kind == .identity {
+                Section(f.kind == .card ? "Card" : "Identity") {
+                    ForEach(itemDetails(kind: f.kind), id: \.label) { spec in
+                        TextField(spec.label, text: Binding(get: { details[spec.label] ?? "" }, set: { details[spec.label] = $0 }))
+                            .keyboardType(Self.numeric.contains(spec.label) ? .numberPad : spec.label == "Email" ? .emailAddress : spec.label == "Phone" ? .phonePad : .default)
+                            .textInputAutocapitalization(spec.label == "Email" ? .never : .words)
+                            .autocorrectionDisabled()
+                            .font(spec.hidden ? .body.monospaced() : .body)
+                    }
+                }
+            }
+            if f.kind == .login || f.kind == .wifi {
                 Section {
                     if f.kind == .login {
                         TextField("User name or email", text: $f.username).textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -177,6 +207,7 @@ struct ItemEditView: View {
         .onChange(of: websites.map(\.uri)) { _, _ in keepDraft() }
         .onChange(of: websites.map(\.matching)) { _, _ in keepDraft() }
         .onChange(of: custom.map { [$0.name, $0.value, $0.hidden ? "1" : ""] }) { _, _ in keepDraft() }
+        .onChange(of: details) { _, _ in keepDraft() }
         .onDisappear {
             // Cancelled or saved: forget the draft. Locked: keep it.
             if store.phase == .unlocked { store.editing = nil }
@@ -227,13 +258,19 @@ struct ItemEditView: View {
             let uri = site.uri.trimmingCharacters(in: .whitespaces)
             return uri.isEmpty ? nil : Website(uri: uri, matching: site.matching)
         }
-        fields.fields = custom.filter { !$0.name.isEmpty || !$0.value.isEmpty }.map { CustomField(name: $0.name, value: $0.value, hidden: $0.hidden) }
+        // A card's or identity's details first, in their order, then the
+        // custom fields.
+        let detailFields = itemDetails(kind: f.kind).compactMap { spec -> CustomField? in
+            let value = (details[spec.label] ?? "").trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : CustomField(name: spec.label, value: value, hidden: spec.hidden)
+        }
+        fields.fields = detailFields + custom.filter { !$0.name.isEmpty || !$0.value.isEmpty }.map { CustomField(name: $0.name, value: $0.value, hidden: $0.hidden) }
         fields.totp = fields.totp.trimmingCharacters(in: .whitespaces)
         return Self.stripped(fields)
     }
 
     /// Without the fields the kind doesn't have: only logins have user
-    /// names, websites and codes; notes no password either.
+    /// names, websites and codes; only they and networks have passwords.
     static func stripped(_ f: ItemFields) -> ItemFields {
         var fields = f
         if fields.kind != .login {
@@ -241,7 +278,7 @@ struct ItemEditView: View {
             fields.websites = []
             fields.totp = ""
         }
-        if fields.kind == .note { fields.password = "" }
+        if fields.kind != .login && fields.kind != .wifi { fields.password = "" }
         return fields
     }
 
