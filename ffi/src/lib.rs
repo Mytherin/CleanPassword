@@ -144,6 +144,8 @@ pub struct ItemFields {
     pub notes: String,
     pub folder: String,
     pub favorite: bool,
+    /// Asks for Face ID again before its secrets are shown or copied.
+    pub reprompt: bool,
     pub fields: Vec<CustomField>,
 }
 
@@ -330,6 +332,7 @@ impl From<ItemFields> for ItemData {
             notes: f.notes,
             folder: f.folder,
             favorite: f.favorite,
+            reprompt: f.reprompt,
             fields: f.fields.into_iter().map(|c| Field { name: c.name, value: c.value, hidden: c.hidden }).collect(),
         }
     }
@@ -354,6 +357,7 @@ fn item_record(i: &Item) -> VaultItem {
             notes: i.notes.clone(),
             folder: i.folder.clone(),
             favorite: i.favorite,
+            reprompt: i.reprompt,
             fields: i.fields.iter().map(|f| CustomField { name: f.name.clone(), value: f.value.clone(), hidden: f.hidden }).collect(),
         },
         history: i.history.iter().map(|h| OldPassword { password: h.password.clone(), retired: secs(h.retired) }).collect(),
@@ -711,6 +715,22 @@ pub fn generate_username(recipe: UsernameRecipe) -> R<String> {
     };
     Ok(generator::generate_username(&r)?)
 }
+
+/// The vault key (`VaultSession::key`) sealed with a PIN, to keep in this
+/// device's keychain for unlocking with the PIN.
+#[uniffi::export]
+pub fn seal_key_with_pin(key: String, pin: String) -> R<String> {
+    let key = cleanpassword_core::crypto::key_from_b64(&key)?;
+    Ok(cleanpassword_core::crypto::seal_with_pin(&key, &pin)?)
+}
+
+/// The vault key from what `seal_key_with_pin` made, if the PIN is right
+/// (`CoreError::WrongPassword` if not).
+#[uniffi::export]
+pub fn open_key_with_pin(sealed: String, pin: String) -> R<String> {
+    let key = cleanpassword_core::crypto::open_with_pin(&sealed, &pin)?;
+    Ok(cleanpassword_core::crypto::b64(&key[..]))
+}
 #[uniffi::export]
 pub fn generate_password(recipe: PasswordRecipe) -> R<String> {
     let r = match recipe {
@@ -776,6 +796,7 @@ mod tests {
             notes: String::new(),
             folder: "Work".into(),
             favorite: false,
+            reprompt: false,
             fields: vec![CustomField { name: "PIN".into(), value: "1234".into(), hidden: true }],
         }
     }

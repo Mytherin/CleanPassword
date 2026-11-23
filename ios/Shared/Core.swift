@@ -161,7 +161,7 @@ func message(_ error: Error) -> String {
 
 extension ItemFields {
     static func empty(kind: Kind = .login) -> ItemFields {
-        ItemFields(kind: kind, name: "", username: "", password: "", websites: [], totp: "", notes: "", folder: "", favorite: false, fields: [])
+        ItemFields(kind: kind, name: "", username: "", password: "", websites: [], totp: "", notes: "", folder: "", favorite: false, reprompt: false, fields: [])
     }
 }
 

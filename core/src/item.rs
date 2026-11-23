@@ -147,6 +147,9 @@ pub struct ItemData {
     /// A folder name; nested folders are written `Work/Email`.
     pub folder: String,
     pub favorite: bool,
+    /// Asks for Face ID (or the master password) again before its secrets
+    /// are shown, copied or filled: Bitwarden's "master password re-prompt".
+    pub reprompt: bool,
     pub fields: Vec<Field>,
 }
 
@@ -201,6 +204,8 @@ pub struct Item {
     #[serde(default)]
     pub favorite: bool,
     #[serde(default)]
+    pub reprompt: bool,
+    #[serde(default)]
     pub fields: Vec<Field>,
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
@@ -233,6 +238,7 @@ impl Item {
             notes: String::new(),
             folder: String::new(),
             favorite: false,
+            reprompt: false,
             fields: Vec::new(),
             history: Vec::new(),
             passkeys: Vec::new(),
@@ -258,6 +264,7 @@ impl Item {
             notes: self.notes.clone(),
             folder: self.folder.clone(),
             favorite: self.favorite,
+            reprompt: self.reprompt,
             fields: self.fields.clone(),
         }
     }
@@ -275,9 +282,10 @@ impl Item {
         if data.password != self.password {
             self.password_modified = Some(now);
         }
-        let ItemData { kind, name, username, password, uris, totp, notes, folder, favorite, fields } = data;
+        let ItemData { kind, name, username, password, uris, totp, notes, folder, favorite, reprompt, fields } = data;
         (self.kind, self.name, self.username, self.password, self.uris) = (kind, name, username, password, uris);
         (self.totp, self.notes, self.folder, self.favorite, self.fields) = (totp, notes, folder, favorite, fields);
+        self.reprompt = reprompt;
         self.modified = now;
         true
     }
@@ -347,6 +355,7 @@ impl Item {
             self.fields.clone_from(&other.fields);
         }
         self.favorite |= other.favorite;
+        self.reprompt |= other.reprompt;
         for p in &other.passkeys {
             if !self.passkeys.iter().any(|q| q.credential_id == p.credential_id) {
                 self.passkeys.push(p.clone());

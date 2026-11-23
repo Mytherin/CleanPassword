@@ -24,6 +24,8 @@ export interface ItemData {
   notes: string;
   folder: string;
   favorite: boolean;
+  /** Asks for Face ID / the master password before showing secrets. */
+  reprompt?: boolean;
   fields: Field[];
 }
 

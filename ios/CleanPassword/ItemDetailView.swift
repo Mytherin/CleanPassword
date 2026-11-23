@@ -21,14 +21,37 @@ struct ItemDetailView: View {
     @State private var copied: String?
     @State private var deletingPasskey: PasskeyInfo?
 
+    /// Face ID passed for an item that asks for it (on this screen).
+    @State private var verified = false
+
     private var item: VaultItem? { store.items.first { $0.id == id } }
 
     var body: some View {
         if let item {
-            content(item)
+            if item.fields.reprompt && !verified {
+                locked(item)
+            } else {
+                content(item)
+            }
         } else {
             ContentUnavailableView("Password Not Found", systemImage: "key")
         }
+    }
+
+    /// An item that asks for Face ID before showing anything of it.
+    private func locked(_ item: VaultItem) -> some View {
+        ContentUnavailableView {
+            Label(item.fields.name, systemImage: "lock.fill")
+        } description: {
+            Text("This item asks for \(BiometricKey.biometryName) before it's shown.")
+        } actions: {
+            Button("Show") { Task { await verify(item) } }.buttonStyle(.borderedProminent)
+        }
+        .task { await verify(item) }
+    }
+
+    private func verify(_ item: VaultItem) async {
+        if await Reprompt.allow(item) { verified = true }
     }
 
     private func content(_ item: VaultItem) -> some View {

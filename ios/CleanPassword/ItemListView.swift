@@ -114,12 +114,16 @@ private struct CodesList: View {
             List(items) { i in
                 let code = try? oneTimeCode(secret: i.fields.totp)
                 Button {
-                    guard let code else { return }
-                    copySecret(code.code)
-                    copied = i.id
-                    Task {
-                        try? await Task.sleep(for: .seconds(1.5))
-                        if copied == i.id { copied = nil }
+                    guard code != nil else { return }
+                    // Made when it's copied, after Face ID for items that ask.
+                    Reprompt.then(i) {
+                        guard let now = try? oneTimeCode(secret: i.fields.totp) else { return }
+                        copySecret(now.code)
+                        copied = i.id
+                        Task {
+                            try? await Task.sleep(for: .seconds(1.5))
+                            if copied == i.id { copied = nil }
+                        }
                     }
                 } label: {
                     HStack(spacing: 12) {
@@ -129,7 +133,11 @@ private struct CodesList: View {
                             Text(copied == i.id ? "Copied" : i.fields.username).font(.subheadline).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if let code {
+                        if let code, i.fields.reprompt {
+                            // Shown only after Face ID: tap to copy.
+                            Image(systemName: "faceid").foregroundStyle(.secondary)
+                            CountdownRing(remaining: code.remaining, period: code.period)
+                        } else if let code {
                             Text(spaced(code.code)).font(.title3.monospacedDigit()).foregroundStyle(.tint)
                             CountdownRing(remaining: code.remaining, period: code.period)
                         } else {

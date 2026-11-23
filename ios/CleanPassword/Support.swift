@@ -1,4 +1,5 @@
 import SwiftUI
+import LocalAuthentication
 import UniformTypeIdentifiers
 
 /// Where the navigation stack can go.
@@ -132,11 +133,11 @@ struct ItemMenu: View {
             Button { copySecret(item.fields.username) } label: { Label("Copy User Name", systemImage: "person") }
         }
         if !item.fields.password.isEmpty {
-            Button { copySecret(item.fields.password) } label: { Label("Copy Password", systemImage: "key") }
+            Button { Reprompt.then(item) { copySecret(item.fields.password) } } label: { Label("Copy Password", systemImage: "key") }
         }
         if !item.fields.totp.isEmpty {
             Button {
-                if let code = try? oneTimeCode(secret: item.fields.totp) { copySecret(code.code) }
+                Reprompt.then(item) { if let code = try? oneTimeCode(secret: item.fields.totp) { copySecret(code.code) } }
             } label: { Label("Copy Verification Code", systemImage: "lock.rotation") }
         }
         Divider()
@@ -197,3 +198,26 @@ enum SortOrder: String, CaseIterable {
     }
 }
 
+
+/// Items marked "Ask for Face ID to Show": their secrets are shown or
+/// copied only after Face ID (or the passcode), even while the vault is
+/// unlocked. One check covers the next half-minute.
+@MainActor
+enum Reprompt {
+    private static var passedAt: Date?
+
+    /// Whether the item's secrets may be used now (asking if needed).
+    static func allow(_ item: VaultItem) async -> Bool {
+        guard item.fields.reprompt else { return true }
+        if let t = passedAt, Date().timeIntervalSince(t) < 30 { return true }
+        let ctx = LAContext()
+        let ok = (try? await ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Show “\(item.fields.name)”")) ?? false
+        if ok { passedAt = Date() }
+        return ok
+    }
+
+    /// Runs `action` once the item's secrets may be used.
+    static func then(_ item: VaultItem, _ action: @escaping () -> Void) {
+        Task { if await allow(item) { action() } }
+    }
+}

@@ -99,6 +99,8 @@ struct BwItem {
     name: Option<String>,
     notes: Option<String>,
     favorite: bool,
+    /// 1: asks for the master password again before showing secrets.
+    reprompt: u32,
     folder_id: Option<String>,
     fields: Option<Vec<BwField>>,
     login: Option<BwLogin>,
@@ -199,6 +201,7 @@ fn convert(export: BwExport) -> Imported {
             name: bw.name.unwrap_or_default(),
             notes: bw.notes.unwrap_or_default(),
             favorite: bw.favorite,
+            reprompt: bw.reprompt == 1,
             folder: bw.folder_id.and_then(|id| folders.get(&id).cloned()).unwrap_or_default(),
             ..Default::default()
         };
@@ -381,6 +384,7 @@ const COLUMNS: &[(&str, &[&str])] = &[
     ("notes", &["notes", "note", "extra", "comments", "comment"]),
     ("folder", &["folder", "grouping", "group", "category", "vault"]),
     ("favorite", &["favorite", "fav", "favourite"]),
+    ("reprompt", &["reprompt"]),
     ("type", &["type"]),
     ("fields", &["fields"]),
 ];
@@ -430,6 +434,7 @@ pub fn csv(text: &str) -> Result<Imported> {
             notes: get("notes"),
             folder: get("folder").replace('\\', "/"),
             favorite: matches!(fav.trim().to_lowercase().as_str(), "1" | "true" | "yes"),
+            reprompt: get("reprompt").trim() == "1",
             fields,
         };
         if d.name.is_empty() && d.username.is_empty() && d.password.is_empty() && d.uris.is_empty() && d.notes.is_empty() {
@@ -476,7 +481,7 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
                     ItemKind::Identity => 4,
                     ItemKind::Note | ItemKind::Wifi => 2,
                 },
-                "reprompt": 0,
+                "reprompt": u32::from(i.reprompt),
                 "name": i.name,
                 "notes": if i.notes.is_empty() { Value::Null } else { i.notes.clone().into() },
                 "favorite": i.favorite,
@@ -668,6 +673,7 @@ mod tests {
             name: "Home".into(),
             password: "correct horse".into(),
             notes: "router in the hall".into(),
+            reprompt: true,
             fields: vec![Field { name: "Band".into(), value: "5 GHz".into(), hidden: false }],
             ..Default::default()
         };

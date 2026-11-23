@@ -9,7 +9,7 @@ final class CoreTests: XCTestCase {
     let password = "a long master password"
 
     func login(_ name: String, _ url: String, user: String = "me", pw: String = "pw-1234") -> ItemFields {
-        ItemFields(kind: .login, name: name, username: user, password: pw, websites: [Website(uri: url, matching: .default)], totp: "", notes: "", folder: "", favorite: false, fields: [])
+        ItemFields(kind: .login, name: name, username: user, password: pw, websites: [Website(uri: url, matching: .default)], totp: "", notes: "", folder: "", favorite: false, reprompt: false, fields: [])
     }
 
     func testCreateAddMatchAndUnlock() throws {
