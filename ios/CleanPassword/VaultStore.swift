@@ -30,6 +30,13 @@ final class VaultStore: ObservableObject {
 
     init() {
         refreshPhase()
+        // Locked as the iPhone locks (whatever the auto-lock delay): the
+        // passwords aren't left decrypted in memory on a locked phone.
+        NotificationCenter.default.addObserver(forName: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                if self?.phase == .unlocked { self?.lock() }
+            }
+        }
     }
 
     var vaultId: String? {
@@ -67,6 +74,11 @@ final class VaultStore: ObservableObject {
         guard let saved = SavedVault.load() else { return refreshPhase() }
         let s = try await Core.shared.detached { try VaultSession.unlock(saved: saved, password: password) }
         await opened(s, from: saved)
+        // Face ID's copy of the key may be from before a master password
+        // change (made elsewhere, or taken up by the AutoFill extension).
+        if let id = vaultId, BiometricKey.exists(vaultId: id), let key = try? await Core.shared.run({ $0.key() }) {
+            try? BiometricKey.store(key: key, vaultId: id)
+        }
     }
 
     /// Unlocks with the key in the keychain, after Face ID. False if that
@@ -93,7 +105,11 @@ final class VaultStore: ObservableObject {
             await opened(s, from: saved)
             return nil
         } catch {
-            return message(error)
+            // The right PIN, but its key is from before the master password
+            // changed: PIN unlock can't work again until it's set up anew.
+            PinKey.remove(vaultId: id)
+            objectWillChange.send()
+            return "The master password was changed, so PIN unlock was turned off. Use the master password."
         }
     }
 
@@ -116,6 +132,9 @@ final class VaultStore: ObservableObject {
     private func opened(_ s: VaultSession, from saved: String? = nil) async {
         await Core.shared.open(s, from: saved)
         try? await Core.shared.persist()
+        // Unlocked with a master password changed on another device: this
+        // iPhone moved to the new vault key.
+        if (try? await Core.shared.run({ $0.keyChanged() })) == true { await keyChanged() }
         phase = .unlocked
         await reload()
         if let d = lockedDraft {
@@ -270,11 +289,30 @@ final class VaultStore: ObservableObject {
                 await reload()
             } catch {
                 syncMessage = message(error)
+                // Another device changed the master password (and the vault
+                // key): the new password unlocks, and moves this iPhone to it.
+                if (try? await Core.shared.run({ $0.passwordChangedElsewhere() })) == true {
+                    lock()
+                    notice = "The master password was changed on another device. Unlock with the new one."
+                }
             }
         }
     }
 
     // MARK: Face ID
+
+    /// The vault key changed (a new master password, here or on another
+    /// device): Face ID's copy is replaced. A PIN can't seal the new key
+    /// without the PIN, so PIN unlock is turned off.
+    func keyChanged() async {
+        guard let id = vaultId, let key = try? await Core.shared.run({ $0.key() }) else { return }
+        if BiometricKey.exists(vaultId: id) { try? BiometricKey.store(key: key, vaultId: id) }
+        if PinKey.exists(vaultId: id) {
+            PinKey.remove(vaultId: id)
+            notice = "The master password changed, so PIN unlock was turned off. Choose a PIN again in Settings."
+        }
+        objectWillChange.send()
+    }
 
     var biometricsOn: Bool {
         vaultId.map { BiometricKey.exists(vaultId: $0) } ?? false

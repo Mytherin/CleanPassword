@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct CleanPasswordApp: App {
@@ -53,10 +54,46 @@ struct RootView: View {
         .onChange(of: store.phase) { _, p in
             if p != .unlocked { path = [] }
         }
+        .onChange(of: phase) { _, p in
+            if p != .active && store.phase == .unlocked { PrivacyCover.show() } else if p == .active { PrivacyCover.hide() }
+        }
         .alert("CleanPassword", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
             Button("OK") { store.notice = nil }
         } message: {
             Text(store.notice ?? "")
+        }
+    }
+}
+
+/// A cover over everything the app shows, sheets and alerts included (they
+/// sit above the root view, so a cover inside it ends up under them): what
+/// the app switcher's snapshot shows while the vault is unlocked.
+@MainActor
+enum PrivacyCover {
+    private static var window: UIWindow?
+
+    static func show() {
+        guard window == nil,
+              let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first
+        else { return }
+        let w = UIWindow(windowScene: scene)
+        w.rootViewController = UIHostingController(rootView: CoverView())
+        w.windowLevel = .alert + 1
+        w.isHidden = false
+        window = w
+    }
+
+    static func hide() {
+        window?.isHidden = true
+        window = nil
+    }
+}
+
+private struct CoverView: View {
+    var body: some View {
+        ZStack {
+            Color(.systemBackground).ignoresSafeArea()
+            Image(systemName: "lock.fill").font(.largeTitle).foregroundStyle(.secondary)
         }
     }
 }

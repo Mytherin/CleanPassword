@@ -27,9 +27,9 @@ enum SavedVault {
 
     static func store(_ text: String) throws {
         try FileManager.default.createDirectory(at: AppGroup.container, withIntermediateDirectories: true)
-        // Also encrypted by iOS until the phone is first unlocked after a
-        // restart (the AutoFill extension needs it after that).
-        try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        // Also encrypted by iOS whenever the phone is locked (the AutoFill
+        // extension only runs on an unlocked phone).
+        try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtection])
     }
 
     static func remove() {
@@ -56,7 +56,7 @@ enum SavedVault {
                     absorbed = try session.absorb(saved: disk, ancestor: lastSaved)
                 }
                 let text = session.save()
-                try Data(text.utf8).write(to: at, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                try Data(text.utf8).write(to: at, options: [.atomic, .completeFileProtection])
                 return (text, absorbed)
             }
         }

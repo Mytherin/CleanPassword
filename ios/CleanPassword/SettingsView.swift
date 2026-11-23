@@ -19,6 +19,8 @@ struct SettingsView: View {
     @State private var importPassword = ""
     @State private var importResult: String?
     @State private var exportDoc: JSONDoc?
+    @State private var askingExport = false
+    @State private var exportPassword = ""
     @State private var confirmForget = false
     @State private var error: String?
 
@@ -105,7 +107,10 @@ struct SettingsView: View {
             }
             Section("Data") {
                 Button("Import…") { importing = true }
-                Button("Export…") { Task { await export() } }
+                Button("Export…") {
+                    exportPassword = ""
+                    askingExport = true
+                }
             }
             if let importResult {
                 Section { Text(importResult).font(.footnote) }
@@ -147,6 +152,15 @@ struct SettingsView: View {
         } message: {
             Text("Enter the password the export was protected with.")
         }
+        // Every password, unencrypted: warned, and only with the master
+        // password (an unlocked iPhone alone isn't enough).
+        .alert("Export every password?", isPresented: $askingExport) {
+            SecureField("Master password", text: $exportPassword)
+            Button("Export") { Task { await export() } }
+            Button("Cancel", role: .cancel) { exportPassword = "" }
+        } message: {
+            Text("The export holds every password unencrypted. Keep it safe, and delete it when you're done.")
+        }
         .fileExporter(isPresented: Binding(get: { exportDoc != nil }, set: { if !$0 { exportDoc = nil } }), document: exportDoc, contentType: .json, defaultFilename: "cleanpassword-export.json") { _ in
             exportDoc = nil
         }
@@ -171,8 +185,14 @@ struct SettingsView: View {
     }
 
     private func export() async {
-        guard let json = try? await Core.shared.run({ $0.exportJson() }) else { return }
-        exportDoc = JSONDoc(text: json)
+        let password = exportPassword
+        exportPassword = ""
+        do {
+            let json = try await Core.shared.run { try $0.exportJson(masterPassword: password) }
+            exportDoc = JSONDoc(text: json)
+        } catch {
+            self.error = message(error)
+        }
     }
 }
 
@@ -254,6 +274,8 @@ struct ChangePasswordView: View {
                     do {
                         let (c, n) = (current, new)
                         try await store.change { try $0.changeMasterPassword(current: c, newPassword: n) }
+                        // A new vault key comes with it.
+                        await store.keyChanged()
                         dismiss()
                     } catch {
                         self.error = message(error)

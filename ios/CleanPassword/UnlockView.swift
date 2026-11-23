@@ -20,6 +20,10 @@ struct UnlockView: View {
             Image(systemName: "lock.fill").font(.system(size: 44)).foregroundStyle(.tint)
             Text("CleanPassword").font(.title2.bold())
             Text("\(info.settings.bucket)/\(info.settings.prefix)").font(.footnote).foregroundStyle(.secondary)
+            if info.passwordChangedElsewhere {
+                Text("The master password was changed on another device: unlock with the new one.")
+                    .font(.footnote).multilineTextAlignment(.center).foregroundStyle(.orange)
+            }
             SecureField(usePin ? "PIN" : "Master password", text: $password)
                 .textContentType(usePin ? .oneTimeCode : .password)
                 .keyboardType(usePin ? .numberPad : .default)

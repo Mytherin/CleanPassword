@@ -283,7 +283,7 @@ impl Vault {
                     let obj = client.get(VAULT_OBJECT).await?;
                     progress(1, 1);
                     match obj {
-                        Some(obj) => match open_vault(&[self.key.clone()], &self.header.vault_id, &obj.data).or_else(|_| {
+                        Some(obj) => match open_vault(std::slice::from_ref(&self.key), &self.header.vault_id, &obj.data).or_else(|_| {
                             // Still sealed with an earlier key: seal it again.
                             let opened = open_vault(&self.keys()[1..], &self.header.vault_id, &obj.data)?;
                             self.s.reseal = true;

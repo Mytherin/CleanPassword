@@ -418,7 +418,7 @@ struct NewLoginForm: View {
                     UsernameMenu(username: $user)
                 }
                 HStack {
-                    Text(password).font(.body.monospaced()).textSelection(.enabled)
+                    Text(password).font(.body.monospaced())
                     Spacer()
                     Button { password = model.newPassword() } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.borderless)
