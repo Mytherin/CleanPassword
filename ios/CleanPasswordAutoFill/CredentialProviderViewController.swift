@@ -218,7 +218,7 @@ final class ExtensionModel: ObservableObject {
                 return await usePasskey(item: w.item, credential: w.credential)
             }
             if let id = wanted, let item = s.get(id: id) {
-                return complete(user: item.fields.username, password: item.fields.password)
+                return complete(item)
             }
             if let r = passkeyRequest {
                 passkeys = s.passkeysFor(rpId: r.rpId, allowed: r.allowed)
@@ -230,6 +230,15 @@ final class ExtensionModel: ObservableObject {
 
     func pick(_ id: String) {
         guard let item = session?.get(id: id) else { return }
+        complete(item)
+    }
+
+    /// Fills a login; one with a verification code also puts its current
+    /// code on the clipboard, for the site's next step (unless that's off).
+    private func complete(_ item: VaultItem) {
+        if Clipboard.copyCodeAfterFill, !item.fields.totp.isEmpty, let code = session?.totp(id: item.id) {
+            copySecret(code.code)
+        }
         complete(user: item.fields.username, password: item.fields.password)
     }
 

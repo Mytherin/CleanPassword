@@ -10,6 +10,8 @@ struct SettingsView: View {
     @State private var biometrics = false
     @State private var suggestions = SuggestionStore.enabled
     @AppStorage(SiteIcons.settingKey) private var siteIcons = true
+    @AppStorage(Clipboard.copyCodeKey, store: Clipboard.defaults) private var copyCode = true
+    @AppStorage(Clipboard.clearKey, store: Clipboard.defaults) private var clearAfter = 90
     @AppStorage(Breaches.settingKey) private var detectCompromised = true
     @State private var importing = false
     @State private var importText: String?
@@ -68,10 +70,17 @@ struct SettingsView: View {
                         SuggestionStore.setEnabled(on)
                         if on { SuggestionStore.update(with: store.items) } else { SuggestionStore.clear() }
                     }
+                Toggle("Copy Verification Code After Filling", isOn: $copyCode)
+                Picker("Clear Clipboard After", selection: $clearAfter) {
+                    Text("30 seconds").tag(30)
+                    Text("90 seconds").tag(90)
+                    Text("5 minutes").tag(300)
+                    Text("Never").tag(0)
+                }
             } header: {
                 Text("AutoFill")
             } footer: {
-                Text("In Settings → General → AutoFill & Passwords, turn on CleanPassword. Suggestions show user names and websites (never passwords) to iOS so it can offer them above the keyboard.")
+                Text("In Settings → General → AutoFill & Passwords, turn on CleanPassword. Suggestions show user names and websites (never passwords) to iOS so it can offer them above the keyboard. Filling a login with a verification code copies its code, ready for the site's next step.")
             }
             Section {
                 Toggle("Show Website Icons", isOn: $siteIcons)

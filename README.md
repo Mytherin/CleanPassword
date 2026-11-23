@@ -73,7 +73,7 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
   - **Passkeys a site already has:** when a site lists the account's existing passkeys and one is in CleanPassword, no second one is made.
   - **The suggestions above the keyboard** register only user names, websites, passkey ids and which logins have codes with iOS, never passwords, keys or code secrets.
   - **Turning it on:** in Settings → General → AutoFill & Passwords, turn on CleanPassword.
-- **Copied passwords** stay on this device (no Universal Clipboard) and are cleared after 90 seconds.
+- **Copied passwords** stay on this device (no Universal Clipboard) and are cleared after 90 seconds (30 seconds to never, in Settings). Filling a login that has a verification code copies the code, ready for the next step (Bitwarden's behaviour; it can be turned off).
 
 ## Security model
 

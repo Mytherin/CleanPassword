@@ -179,8 +179,3 @@ enum SortOrder: String, CaseIterable {
     }
 }
 
-/// Copies to the clipboard on this device only (not to other devices
-/// through Universal Clipboard), cleared after 90 seconds.
-func copySecret(_ text: String) {
-    UIPasteboard.general.setItems([[UTType.plainText.identifier: text]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(90)])
-}
