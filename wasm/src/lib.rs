@@ -415,6 +415,14 @@ pub fn generate_password(recipe: JsValue) -> JsResult<String> {
     generator::generate(&recipe).map_err(err)
 }
 
+
+/// A user name from a recipe: `{kind: "word", capitalize, number}`,
+/// `{kind: "plusAddress", email}` or `{kind: "catchAll", domain}`.
+#[wasm_bindgen(js_name = generateUsername)]
+pub fn generate_username(recipe: JsValue) -> JsResult<String> {
+    let recipe: generator::UsernameRecipe = from_js(recipe).map_err(bad)?;
+    generator::generate_username(&recipe).map_err(err)
+}
 /// A password for a site, following its known rules (or its
 /// `passwordrules` attribute, if given).
 #[wasm_bindgen(js_name = generateForSite)]

@@ -166,6 +166,65 @@ fn wordlist() -> &'static [&'static str] {
     WORDS.get_or_init(|| include_str!("../data/eff_large_wordlist.txt").lines().filter_map(|l| l.split('\t').nth(1)).map(str::trim).collect())
 }
 
+/// How a user name is made, as in Bitwarden's username generator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum UsernameRecipe {
+    /// A random word (`walnut`), capitalized and with four digits if asked
+    /// (`Walnut4821`).
+    Word {
+        #[serde(default)]
+        capitalize: bool,
+        #[serde(default)]
+        number: bool,
+    },
+    /// The email address with a random tag (`me+k3x9q2va@example.com`):
+    /// mail still arrives, and each site gets an address of its own.
+    PlusAddress { email: String },
+    /// A random name at a domain that takes every address
+    /// (`k3x9q2va@example.com`).
+    CatchAll { domain: String },
+}
+
+/// Eight random lowercase letters and digits (no look-alikes).
+fn tag() -> String {
+    const CHARS: &[u8] = b"abcdefghijkmnopqrstuvwxyz23456789";
+    (0..8).map(|_| CHARS[OsRng.gen_range(0..CHARS.len())] as char).collect()
+}
+
+pub fn generate_username(recipe: &UsernameRecipe) -> Result<String> {
+    match recipe {
+        UsernameRecipe::Word { capitalize, number } => {
+            let word = wordlist().choose(&mut OsRng).copied().unwrap_or("user").replace(['-', ' '], "");
+            let mut out = if *capitalize {
+                let mut c = word.chars();
+                c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+            } else {
+                word
+            };
+            if *number {
+                out.push_str(&format!("{:04}", OsRng.gen_range(0..10_000)));
+            }
+            Ok(out)
+        }
+        UsernameRecipe::PlusAddress { email } => {
+            let email = email.trim();
+            let (user, domain) =
+                email.rsplit_once('@').filter(|(u, d)| !u.is_empty() && d.contains('.')).ok_or_else(|| Error::invalid("enter your email address, as name@example.com"))?;
+            // A tag already there is replaced.
+            let user = user.split('+').next().unwrap_or(user);
+            Ok(format!("{user}+{}@{domain}", tag()))
+        }
+        UsernameRecipe::CatchAll { domain } => {
+            let domain = domain.trim().trim_start_matches('@');
+            if !domain.contains('.') || domain.contains('@') || domain.contains(char::is_whitespace) {
+                return Err(Error::invalid("enter a domain, as example.com"));
+            }
+            Ok(format!("{}@{domain}", tag()))
+        }
+    }
+}
+
 /// A rough strength estimate for a password people chose (not a
 /// generated one): bits from length and character variety, with penalties
 /// for repeats and sequences. `score` is 0 (very weak) to 4 (strong).
@@ -298,5 +357,19 @@ mod tests {
         assert!(strength("abcdefgh").score <= 1);
         assert!(strength(&generate(&Recipe::Apple).unwrap()).score >= 3);
         assert_eq!(strength("correct-horse-battery-staple-xylophone").score, 4);
+    }
+
+    #[test]
+    fn usernames() {
+        let w = generate_username(&UsernameRecipe::Word { capitalize: true, number: true }).unwrap();
+        assert!(w.chars().next().unwrap().is_uppercase());
+        assert!(w[w.len() - 4..].chars().all(|c| c.is_ascii_digit()));
+        let p = generate_username(&UsernameRecipe::PlusAddress { email: " me+old@example.com ".into() }).unwrap();
+        assert!(p.starts_with("me+") && p.ends_with("@example.com") && !p.contains("old"), "{p}");
+        assert_eq!(p.len(), "me+".len() + 8 + "@example.com".len());
+        let c = generate_username(&UsernameRecipe::CatchAll { domain: "@mail.example.com".into() }).unwrap();
+        assert!(c.ends_with("@mail.example.com") && c.len() == 8 + "@mail.example.com".len());
+        assert!(generate_username(&UsernameRecipe::PlusAddress { email: "not-an-email".into() }).is_err());
+        assert!(generate_username(&UsernameRecipe::CatchAll { domain: "nodot".into() }).is_err());
     }
 }

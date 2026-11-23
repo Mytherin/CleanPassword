@@ -505,7 +505,14 @@ function edit(item: Item | null): void {
   const err = errorBox();
   const save = h("button", { class: "btn primary", type: "submit" }, "Save");
   const passwordRow = h("label", {}, "Password", h("div", { class: "inline" }, password, reveal, gen), meter.el);
-  const loginOnly = [h("label", {}, "User name", username), h("label", {}, "Websites", uris, h("button", { class: "link small", type: "button", style: "align-self:flex-start", onclick: () => addUri() }, "Add website")), h("label", {}, "One-time code (TOTP)", totp)];
+  // A random user name: a word, or a tagged address when an email is typed
+  // there (me@example.com → me+k3x9q2va@example.com).
+  const genUser = h("button", { class: "btn small", type: "button", title: "Generate a user name", onclick: async () => {
+    const typed = username.value.trim();
+    const recipe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(typed) ? { kind: "plusAddress", email: typed } : { kind: "word", capitalize: false, number: true };
+    username.value = await ask<string>("generate-username", { recipe });
+  } }, "Generate");
+  const loginOnly = [h("label", {}, "User name", h("div", { class: "inline" }, username, genUser)),h("label", {}, "Websites", uris, h("button", { class: "link small", type: "button", style: "align-self:flex-start", onclick: () => addUri() }, "Add website")), h("label", {}, "One-time code (TOTP)", totp)];
   // A card's or identity's details, one input each (kept across kind changes).
   const detailInputs = new Map<string, HTMLInputElement>();
   const detailBox = h("div", { style: "display:flex; flex-direction:column; gap:8px" });

@@ -829,6 +829,8 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     }
     case "generate":
       return core.generatePassword(msg.recipe as Recipe);
+    case "generate-username":
+      return core.generateUsername(msg.recipe as object);
     case "passkey-state":
       return passkeyState(String(msg.token));
     case "passkey-answer":

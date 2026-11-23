@@ -99,7 +99,10 @@ struct ItemEditView: View {
             if f.kind == .login || f.kind == .wifi {
                 Section {
                     if f.kind == .login {
-                        TextField("User name or email", text: $f.username).textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        HStack {
+                            TextField("User name or email", text: $f.username).textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                            UsernameMenu(username: $f.username)
+                        }
                     }
                     HStack {
                         Group {

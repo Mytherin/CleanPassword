@@ -155,4 +155,12 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(ItemRow(item: item).subtitle, "Card •••• 1234")
         XCTAssertTrue(s.matches(url: "https://visa.com").isEmpty)
     }
+
+    func testUsernames() throws {
+        let tagged = try generateUsername(recipe: .plusAddress(email: "me@example.com"))
+        XCTAssertTrue(tagged.hasPrefix("me+") && tagged.hasSuffix("@example.com"))
+        XCTAssertTrue(try generateUsername(recipe: .catchAll(domain: "example.com")).hasSuffix("@example.com"))
+        XCTAssertFalse(try generateUsername(recipe: .word(capitalize: false, number: false)).isEmpty)
+        XCTAssertThrowsError(try generateUsername(recipe: .plusAddress(email: "nope")))
+    }
 }

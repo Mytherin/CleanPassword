@@ -691,6 +691,26 @@ pub fn item_details(kind: Kind) -> Vec<DetailSpec> {
     };
     kind.details().iter().map(|d| DetailSpec { label: d.label.into(), hidden: d.hidden }).collect()
 }
+
+/// How a user name is made (see the core's `UsernameRecipe`).
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum UsernameRecipe {
+    Word { capitalize: bool, number: bool },
+    PlusAddress { email: String },
+    CatchAll { domain: String },
+}
+
+/// A user name: a random word, your email with a random tag, or a random
+/// name at a catch-all domain.
+#[uniffi::export]
+pub fn generate_username(recipe: UsernameRecipe) -> R<String> {
+    let r = match recipe {
+        UsernameRecipe::Word { capitalize, number } => generator::UsernameRecipe::Word { capitalize, number },
+        UsernameRecipe::PlusAddress { email } => generator::UsernameRecipe::PlusAddress { email },
+        UsernameRecipe::CatchAll { domain } => generator::UsernameRecipe::CatchAll { domain },
+    };
+    Ok(generator::generate_username(&r)?)
+}
 #[uniffi::export]
 pub fn generate_password(recipe: PasswordRecipe) -> R<String> {
     let r = match recipe {

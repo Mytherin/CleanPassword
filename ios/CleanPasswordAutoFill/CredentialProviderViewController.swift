@@ -394,8 +394,11 @@ struct NewLoginForm: View {
     var body: some View {
         Form {
             Section {
-                TextField("User name or email", text: $user)
-                    .textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                HStack {
+                    TextField("User name or email", text: $user)
+                        .textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    UsernameMenu(username: $user)
+                }
                 HStack {
                     Text(password).font(.body.monospaced()).textSelection(.enabled)
                     Spacer()
