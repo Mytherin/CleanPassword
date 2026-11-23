@@ -99,6 +99,8 @@ impl From<AwsKeys> for AwsCredentials {
 pub enum Kind {
     Login,
     Note,
+    /// A Wi-Fi network: its name is the item's, with its password.
+    Wifi,
 }
 
 /// How a website is matched (Bitwarden's options).
@@ -309,7 +311,11 @@ fn uri_match(m: Matching) -> Option<UriMatch> {
 impl From<ItemFields> for ItemData {
     fn from(f: ItemFields) -> Self {
         ItemData {
-            kind: if f.kind == Kind::Note { ItemKind::Note } else { ItemKind::Login },
+            kind: match f.kind {
+                Kind::Login => ItemKind::Login,
+                Kind::Note => ItemKind::Note,
+                Kind::Wifi => ItemKind::Wifi,
+            },
             name: f.name,
             username: f.username,
             password: f.password,
@@ -327,7 +333,11 @@ fn item_record(i: &Item) -> VaultItem {
     VaultItem {
         id: i.id.clone(),
         fields: ItemFields {
-            kind: if i.kind == ItemKind::Note { Kind::Note } else { Kind::Login },
+            kind: match i.kind {
+                ItemKind::Login => Kind::Login,
+                ItemKind::Note => Kind::Note,
+                ItemKind::Wifi => Kind::Wifi,
+            },
             name: i.name.clone(),
             username: i.username.clone(),
             password: i.password.clone(),

@@ -55,16 +55,22 @@ struct ItemEditView: View {
                 Picker("Kind", selection: $f.kind) {
                     Text("Login").tag(Kind.login)
                     Text("Secure Note").tag(Kind.note)
+                    Text("Wi-Fi Network").tag(Kind.wifi)
                 }
-                TextField("Name", text: $f.name)
+                TextField(f.kind == .wifi ? "Network name" : "Name", text: $f.name)
+                    .autocorrectionDisabled(f.kind == .wifi)
             } footer: {
-                if f.kind == .note && original.kind == .login && hasLoginFields {
-                    Text("The user name, password, websites and verification code are removed when you save it as a note.")
+                if f.kind != .login && original.kind == .login && hasLoginFields {
+                    Text(f.kind == .wifi
+                        ? "The user name, websites and verification code are removed when you save it as a Wi-Fi network."
+                        : "The user name, password, websites and verification code are removed when you save it as a note.")
                 }
             }
-            if f.kind == .login {
+            if f.kind != .note {
                 Section {
-                    TextField("User name or email", text: $f.username).textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    if f.kind == .login {
+                        TextField("User name or email", text: $f.username).textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    }
                     HStack {
                         Group {
                             if showPassword { TextField("Password", text: $f.password) } else { SecureField("Password", text: $f.password) }
@@ -80,6 +86,8 @@ struct ItemEditView: View {
                     }
                     if !f.password.isEmpty { StrengthMeter(password: f.password) }
                 }
+            }
+            if f.kind == .login {
                 Section {
                     ForEach($websites) { $site in
                         HStack {
@@ -193,6 +201,8 @@ struct ItemEditView: View {
         let fields = composed()
         let empty = fields.name.trimmingCharacters(in: .whitespaces).isEmpty && fields.username.isEmpty && fields.password.isEmpty
             && fields.websites.isEmpty && fields.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && fields.fields.isEmpty
+        // A network needs its name (it's what the phone joins).
+        if fields.kind == .wifi && fields.name.trimmingCharacters(in: .whitespaces).isEmpty { return false }
         return !empty && !totpInvalid
     }
 
@@ -219,12 +229,19 @@ struct ItemEditView: View {
         }
         fields.fields = custom.filter { !$0.name.isEmpty || !$0.value.isEmpty }.map { CustomField(name: $0.name, value: $0.value, hidden: $0.hidden) }
         fields.totp = fields.totp.trimmingCharacters(in: .whitespaces)
-        if fields.kind == .note {
+        return Self.stripped(fields)
+    }
+
+    /// Without the fields the kind doesn't have: only logins have user
+    /// names, websites and codes; notes no password either.
+    static func stripped(_ f: ItemFields) -> ItemFields {
+        var fields = f
+        if fields.kind != .login {
             fields.username = ""
-            fields.password = ""
             fields.websites = []
             fields.totp = ""
         }
+        if fields.kind == .note { fields.password = "" }
         return fields
     }
 
@@ -256,10 +273,8 @@ struct ItemEditView: View {
         var fields = composed()
         if let id = itemId, let current = store.items.first(where: { $0.id == id })?.fields {
             fields = Self.rebase(edited: fields, original: original, onto: current)
-            // A note has no login fields, whatever was synced into them.
-            if fields.kind == .note {
-                (fields.username, fields.password, fields.websites, fields.totp) = ("", "", [], "")
-            }
+            // Nor fields its kind doesn't have that were synced in.
+            fields = Self.stripped(fields)
         }
         do {
             _ = try await store.save(id: itemId, fields: fields)

@@ -12,7 +12,8 @@ struct ItemListView: View {
     var body: some View {
         Group {
             switch category {
-            case .all: sorted(store.items)
+            case .all: sorted(store.items.filter { $0.fields.kind != .wifi })
+            case .wifi: sorted(store.items.filter { $0.fields.kind == .wifi })
             case .folder(let f): sorted(store.items.filter { $0.fields.folder == f })
             case .passkeys: sorted(store.items.filter { !$0.passkeys.isEmpty })
             case .favorites: sorted(store.items.filter(\.fields.favorite))
@@ -62,6 +63,8 @@ struct ItemListView: View {
             if items.isEmpty {
                 if !search.isEmpty {
                     ContentUnavailableView.search(text: search)
+                } else if category == .wifi {
+                    ContentUnavailableView("No Wi-Fi Networks", systemImage: "wifi", description: Text("Add one with + on the Passwords screen, as a Wi-Fi Network."))
                 } else if category == .favorites {
                     ContentUnavailableView("No Favorites", systemImage: "star", description: Text("Touch and hold a password and choose Add to Favorites."))
                 } else {
@@ -80,7 +83,7 @@ struct ItemListView: View {
 private extension Category {
     var sortable: Bool {
         switch self {
-        case .all, .folder, .passkeys, .favorites: return true
+        case .all, .folder, .passkeys, .favorites, .wifi: return true
         case .codes, .security, .deleted: return false
         }
     }

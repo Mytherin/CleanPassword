@@ -16,6 +16,8 @@ enum Category: Hashable {
     case passkeys
     /// Items with a one-time code.
     case codes
+    /// Wi-Fi networks.
+    case wifi
     /// Weak and reused passwords.
     case security
     /// Recently Deleted.
@@ -29,6 +31,7 @@ enum Category: Hashable {
         case .all: return "All"
         case .passkeys: return "Passkeys"
         case .codes: return "Codes"
+        case .wifi: return "Wi-Fi"
         case .security: return "Security"
         case .deleted: return "Deleted"
         case .favorites: return "Favorites"
@@ -41,6 +44,7 @@ enum Category: Hashable {
         case .all: return "key.fill"
         case .passkeys: return "person.badge.key.fill"
         case .codes: return "lock.rotation"
+        case .wifi: return "wifi"
         case .security: return "exclamationmark.shield.fill"
         case .deleted: return "trash.fill"
         case .favorites: return "star.fill"
@@ -53,6 +57,7 @@ enum Category: Hashable {
         case .all: return .blue
         case .passkeys: return .green
         case .codes: return .indigo
+        case .wifi: return .cyan
         case .security: return .red
         case .deleted: return .orange
         case .favorites: return .yellow
@@ -94,6 +99,7 @@ struct ItemRow: View {
 
     private var subtitle: String {
         if item.fields.kind == .note { return "Secure note" }
+        if item.fields.kind == .wifi { return "Wi-Fi network" }
         return item.fields.username.isEmpty ? (item.host ?? "") : item.fields.username
     }
 }

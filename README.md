@@ -52,9 +52,10 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 
 ### iPhone app
 
-- **The Passwords screen, as in Apple's Passwords app:** tiles for **All**, **Passkeys**, **Codes**, **Security**, **Deleted** and **Favorites** with their counts, your folders below them, and search across everything (fields included). The "…" menu has Settings, the generator and Lock Now; the bottom toolbar shows the sync status and New Password.
+- **The Passwords screen, as in Apple's Passwords app:** tiles for **All**, **Passkeys**, **Codes**, **Wi-Fi**, **Security**, **Deleted** and **Favorites** with their counts, your folders below them, and search across everything (fields included). The "…" menu has Settings, the generator and Lock Now; the bottom toolbar shows the sync status and New Password.
   - **All, Passkeys, Favorites and folders** sort by title (in letter sections), website, date created or date edited, and have their own search. Touch and hold an item to copy its user name, password or code, add it to Favorites, or delete it.
   - **Codes** shows each item's current verification code with a countdown ring; tap one to copy it.
+  - **Wi-Fi** keeps network names and passwords (new item → Wi-Fi Network); each shows a QR code another phone joins the network from. Networks are never offered on websites or audited, and export to Bitwarden JSON as notes that import back as networks.
   - **Security** lists **compromised passwords** (found in data leaks, checked with Have I Been Pwned by the first five characters of each password's SHA-1 only; it can be turned off in Settings), offers to merge duplicate logins, then lists reused passwords, then weak ones.
   - **Deleted** keeps items 30 days; swipe to recover or delete for good, or Recover All / Delete All.
 - **An item** shows its icon, name and modified date on top, then user name, password (dots until tapped), verification code, websites, fields, notes and earlier passwords, each with a copy button; hidden fields and earlier passwords show on their own tap. Edit opens the editor, with the generator (following the site's password rules), a strength meter, custom fields and each website's matching.

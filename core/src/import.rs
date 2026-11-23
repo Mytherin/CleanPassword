@@ -29,6 +29,10 @@ use crate::item::{Field, HistoryEntry, Item, ItemData, ItemKind, ItemUri, Passke
 use crate::passkey;
 use crate::{Error, Result};
 
+/// The hidden field a Wi-Fi network's password goes in when exported to
+/// Bitwarden's format (which has no Wi-Fi type), and comes back from.
+const WIFI_PASSWORD_FIELD: &str = "Wi-Fi Password";
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ImportedItem {
     pub data: ItemData,
@@ -239,6 +243,14 @@ fn convert(export: BwExport) -> Imported {
             }
             _ => d.kind = ItemKind::Note,
         }
+        // A Wi-Fi network, as CleanPassword exports one (Bitwarden has no
+        // such type): a note with its password in a hidden field.
+        if d.kind == ItemKind::Note {
+            if let Some(n) = d.fields.iter().position(|f| f.hidden && f.name == WIFI_PASSWORD_FIELD) {
+                d.kind = ItemKind::Wifi;
+                d.password = d.fields.remove(n).value;
+            }
+        }
         let history = bw
             .password_history
             .unwrap_or_default()
@@ -419,7 +431,10 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
     let items: Vec<Value> = items
         .iter()
         .map(|i| {
-            let fields: Vec<Value> = i.fields.iter().map(|f| json!({"name": f.name, "value": f.value, "type": if f.hidden { 1 } else { 0 }, "linkedId": null})).collect();
+            let mut fields: Vec<Value> = i.fields.iter().map(|f| json!({"name": f.name, "value": f.value, "type": if f.hidden { 1 } else { 0 }, "linkedId": null})).collect();
+            if i.kind == ItemKind::Wifi {
+                fields.push(json!({"name": WIFI_PASSWORD_FIELD, "value": i.password, "type": 1, "linkedId": null}));
+            }
             let history: Vec<Value> = i.history.iter().map(|h| json!({"lastUsedDate": h.retired, "password": h.password})).collect();
             let mut v = json!({
                 "id": i.id,
@@ -599,5 +614,24 @@ mod tests {
         for (a, b) in items.iter().zip(&back.items) {
             assert_eq!(a.data(), b.data);
         }
+    }
+
+    /// Bitwarden has no Wi-Fi type: a network goes out as a note with its
+    /// password in a hidden field, and comes back as a network.
+    #[test]
+    fn wifi_round_trips_through_export() {
+        let data = ItemData {
+            kind: ItemKind::Wifi,
+            name: "Home".into(),
+            password: "correct horse".into(),
+            notes: "router in the hall".into(),
+            fields: vec![Field { name: "Band".into(), value: "5 GHz".into(), hidden: false }],
+            ..Default::default()
+        };
+        let item = Item::new(data.clone(), Utc::now());
+        let exported = export_bitwarden_json(&[&item]);
+        assert!(exported.contains("\"type\": 2") || exported.contains("\"type\":2"), "a secure note in Bitwarden's terms");
+        let back = import_file(&exported, None).unwrap();
+        assert_eq!(back.items[0].data, data);
     }
 }

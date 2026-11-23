@@ -119,4 +119,20 @@ final class CoreTests: XCTestCase {
         XCTAssertNil(CodeScannerView.label(of: "JBSWY3DPEHPK3PXP").account)
         XCTAssertTrue(isValidTotp(secret: "otpauth://totp/GitHub:octo?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"))
     }
+
+    /// Wi-Fi networks: a kind of their own, never offered on sites, and a
+    /// join QR code with the format's special characters escaped.
+    func testWifi() throws {
+        let s = try VaultSession.create(settings: settings, keys: keys, password: password)
+        var f = ItemFields.empty(kind: .wifi)
+        f.name = "Home;Net"
+        f.password = "pa:ss\"word"
+        let id = try s.add(fields: f)
+        XCTAssertEqual(s.get(id: id)?.fields.kind, .wifi)
+        XCTAssertTrue(s.matches(url: "https://home.net").isEmpty)
+        XCTAssertTrue(s.audit().isEmpty, "networks aren't audited")
+        XCTAssertEqual(WifiQR.payload(network: f.name, password: f.password), "WIFI:T:WPA;S:Home\;Net;P:pa\:ss\\\"word;;")
+        XCTAssertEqual(WifiQR.payload(network: "Cafe", password: ""), "WIFI:T:nopass;S:Cafe;;")
+        XCTAssertNotNil(WifiQR.image(network: "Cafe", password: "x"))
+    }
 }

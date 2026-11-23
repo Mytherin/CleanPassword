@@ -328,7 +328,7 @@ function matchRow(m: Match): HTMLElement {
 }
 
 function itemRow(i: Item): HTMLElement {
-  const sub = i.kind === "note" ? "Secure note" : i.username || hostOf(i.uris[0]?.uri) || "";
+  const sub = i.kind === "note" ? "Secure note" : i.kind === "wifi" ? "Wi-Fi network" : i.username || hostOf(i.uris[0]?.uri) || "";
   return h("button", { class: "row", onclick: () => void detail(i.id) },
     monogram(i.name), h("span", { class: "text" }, h("div", { class: "title" }, i.name), h("div", { class: "sub" }, sub)),
     i.folder ? h("span", { class: "pill" }, i.folder) : null);
@@ -447,7 +447,7 @@ function edit(item: Item | null): void {
   const d: ItemData = item
     ? { kind: item.kind, name: item.name, username: item.username, password: item.password, uris: item.uris, totp: item.totp, notes: item.notes, folder: item.folder, favorite: item.favorite, fields: item.fields }
     : { kind: "login", name: "", username: "", password: "", uris: [], totp: "", notes: "", folder: "", favorite: false, fields: [] };
-  const kind = h("select", {}, h("option", { value: "login" }, "Login"), h("option", { value: "note" }, "Secure note"));
+  const kind = h("select", {}, h("option", { value: "login" }, "Login"), h("option", { value: "note" }, "Secure note"), h("option", { value: "wifi" }, "Wi-Fi network"));
   kind.value = d.kind;
   const name = input({ value: d.name, placeholder: "Name" });
   const username = input({ value: d.username, placeholder: "User name or email" });
@@ -479,12 +479,19 @@ function edit(item: Item | null): void {
   const notes = h("textarea", {}, d.notes);
   const err = errorBox();
   const save = h("button", { class: "btn primary", type: "submit" }, "Save");
-  const loginOnly = [h("label", {}, "User name", username), h("label", {}, "Password", h("div", { class: "inline" }, password, reveal, gen), meter.el), h("label", {}, "Websites", uris, h("button", { class: "link small", type: "button", style: "align-self:flex-start", onclick: () => addUri() }, "Add website")), h("label", {}, "One-time code (TOTP)", totp)];
-  const sync = () => loginOnly.forEach((n) => (n.style.display = kind.value === "login" ? "" : "none"));
+  const passwordRow = h("label", {}, "Password", h("div", { class: "inline" }, password, reveal, gen), meter.el);
+  const loginOnly = [h("label", {}, "User name", username), h("label", {}, "Websites", uris, h("button", { class: "link small", type: "button", style: "align-self:flex-start", onclick: () => addUri() }, "Add website")), h("label", {}, "One-time code (TOTP)", totp)];
+  // Logins have everything; a Wi-Fi network only its name and password; a
+  // note neither.
+  const sync = () => {
+    loginOnly.forEach((n) => (n.style.display = kind.value === "login" ? "" : "none"));
+    passwordRow.style.display = kind.value === "note" ? "none" : "";
+    name.placeholder = kind.value === "wifi" ? "Network name" : "Name";
+  };
   kind.addEventListener("change", sync);
   sync();
   const form = h("form", { class: "form" },
-    h("label", {}, "Kind", kind), h("label", {}, "Name", name), ...loginOnly,
+    h("label", {}, "Kind", kind), h("label", {}, "Name", name), loginOnly[0], passwordRow, ...loginOnly.slice(1),
     h("label", {}, "Folder", folder, folders), h("label", { class: "check" }, favorite, "Favorite"), h("label", {}, "Notes", notes),
     err, h("div", { style: "display:flex; justify-content:flex-end; gap:8px" }, save),
   );
@@ -503,6 +510,9 @@ function edit(item: Item | null): void {
         favorite: favorite.checked,
         notes: notes.value,
       };
+      // Only logins have user names, websites and codes; notes no password.
+      if (data.kind !== "login") Object.assign(data, { username: "", uris: [], totp: "" });
+      if (data.kind === "note") data.password = "";
       if (item) {
         await ask("update", { id: item.id, data });
         await detail(item.id);

@@ -16,6 +16,10 @@ pub enum ItemKind {
     /// A secure note (also what cards, identities and SSH keys from other
     /// password managers become, with their details as fields).
     Note,
+    /// A Wi-Fi network, as in Apple's Passwords: `name` is the network's
+    /// name and `password` its password. Never offered on websites, nor
+    /// audited.
+    Wifi,
 }
 
 /// How a saved website address is matched against a page (Bitwarden's

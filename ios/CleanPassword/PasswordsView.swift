@@ -78,9 +78,10 @@ struct PasswordsView: View {
         List {
             Section {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-                    tile(.all, count: store.items.count)
+                    tile(.all, count: store.items.filter { $0.fields.kind != .wifi }.count)
                     tile(.passkeys, count: store.items.filter { !$0.passkeys.isEmpty }.count)
                     tile(.codes, count: store.items.filter { !$0.fields.totp.isEmpty }.count)
+                    tile(.wifi, count: store.items.filter { $0.fields.kind == .wifi }.count)
                     tile(.security, count: store.findings.filter { f in !HiddenRecommendations.isHidden(store.items.first { $0.id == f.id }, in: hidden) }.count)
                     tile(.deleted, count: store.trash.count)
                     tile(.favorites, count: store.items.filter { $0.fields.favorite }.count)

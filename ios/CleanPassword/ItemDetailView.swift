@@ -44,6 +44,29 @@ struct ItemDetailView: View {
                 .frame(maxWidth: .infinity)
                 .listRowBackground(Color.clear)
             }
+            if f.kind == .wifi {
+                Section {
+                    copyRow("Network", f.name, key: "network")
+                    if !f.password.isEmpty { passwordRow(f.password) }
+                }
+                Section {
+                    if let qr = WifiQR.image(network: f.name, password: f.password) {
+                        Image(uiImage: qr)
+                            .interpolation(.none)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 220)
+                            .padding(12)
+                            .background(Color.white, in: RoundedRectangle(cornerRadius: 12))
+                            .frame(maxWidth: .infinity)
+                            .accessibilityLabel("QR code to join \(f.name)")
+                    }
+                } header: {
+                    Text("Join This Network")
+                } footer: {
+                    Text("Point another phone's camera at this code to join \(f.name).")
+                }
+            }
             if f.kind == .login {
                 Section {
                     if !f.username.isEmpty { copyRow("User Name", f.username, key: "user") }
@@ -123,7 +146,7 @@ struct ItemDetailView: View {
                 }
             }
             Section {
-                Button(f.kind == .note ? "Delete Note" : "Delete Password", role: .destructive) { confirmDelete = true }
+                Button(f.kind == .note ? "Delete Note" : f.kind == .wifi ? "Delete Network" : "Delete Password", role: .destructive) { confirmDelete = true }
             }
         }
         .listStyle(.insetGrouped)
