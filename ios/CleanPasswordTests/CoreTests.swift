@@ -131,7 +131,7 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(s.get(id: id)?.fields.kind, .wifi)
         XCTAssertTrue(s.matches(url: "https://home.net").isEmpty)
         XCTAssertTrue(s.audit().isEmpty, "networks aren't audited")
-        XCTAssertEqual(WifiQR.payload(network: f.name, password: f.password), "WIFI:T:WPA;S:Home\;Net;P:pa\:ss\\\"word;;")
+        XCTAssertEqual(WifiQR.payload(network: f.name, password: f.password), #"WIFI:T:WPA;S:Home\;Net;P:pa\:ss\"word;;"#)
         XCTAssertEqual(WifiQR.payload(network: "Cafe", password: ""), "WIFI:T:nopass;S:Cafe;;")
         XCTAssertNotNil(WifiQR.image(network: "Cafe", password: "x"))
     }
