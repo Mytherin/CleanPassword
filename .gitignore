@@ -1,6 +1,7 @@
 /target
 /.claude/worktrees
 /extension/dist
+/extension/dist-safari
 /extension/node_modules
 /extension/src/core
 /ios/build

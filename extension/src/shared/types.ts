@@ -1,6 +1,6 @@
 // Types shared by the service worker, the content script and the pages.
 
-export type ItemKind = "login" | "note" | "wifi";
+export type ItemKind = "login" | "note" | "wifi" | "card" | "identity";
 export type UriMatch = "domain" | "host" | "startswith" | "exact" | "regex" | "never";
 
 export interface ItemUri {
@@ -24,6 +24,8 @@ export interface ItemData {
   notes: string;
   folder: string;
   favorite: boolean;
+  /** Asks for Face ID / the master password before showing secrets. */
+  reprompt?: boolean;
   fields: Field[];
 }
 

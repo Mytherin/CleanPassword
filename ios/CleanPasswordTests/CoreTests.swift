@@ -9,7 +9,7 @@ final class CoreTests: XCTestCase {
     let password = "a long master password"
 
     func login(_ name: String, _ url: String, user: String = "me", pw: String = "pw-1234") -> ItemFields {
-        ItemFields(kind: .login, name: name, username: user, password: pw, websites: [Website(uri: url, matching: .default)], totp: "", notes: "", folder: "", favorite: false, fields: [])
+        ItemFields(kind: .login, name: name, username: user, password: pw, websites: [Website(uri: url, matching: .default)], totp: "", notes: "", folder: "", favorite: false, reprompt: false, fields: [])
     }
 
     func testCreateAddMatchAndUnlock() throws {
@@ -134,5 +134,53 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(WifiQR.payload(network: f.name, password: f.password), #"WIFI:T:WPA;S:Home\;Net;P:pa\:ss\"word;;"#)
         XCTAssertEqual(WifiQR.payload(network: "Cafe", password: ""), "WIFI:T:nopass;S:Cafe;;")
         XCTAssertNotNil(WifiQR.image(network: "Cafe", password: "x"))
+    }
+
+    /// Cards and identities: their details come from the core, and are
+    /// kept as the item's fields.
+    func testCardsAndIdentities() throws {
+        let card = itemDetails(kind: .card)
+        XCTAssertEqual(card.first?.label, "Cardholder name")
+        XCTAssertTrue(card.contains { $0.label == "Number" && $0.hidden })
+        XCTAssertTrue(itemDetails(kind: .identity).contains { $0.label == "Email" })
+        XCTAssertTrue(itemDetails(kind: .login).isEmpty)
+
+        let s = try VaultSession.create(settings: settings, keys: keys, password: password)
+        var f = ItemFields.empty(kind: .card)
+        f.name = "Visa"
+        f.fields = [CustomField(name: "Number", value: "4111 1111 1111 1234", hidden: true)]
+        let id = try s.add(fields: f)
+        let item = try XCTUnwrap(s.get(id: id))
+        XCTAssertEqual(item.fields.kind, .card)
+        XCTAssertEqual(ItemRow(item: item).subtitle, "Card •••• 1234")
+        XCTAssertTrue(s.matches(url: "https://visa.com").isEmpty)
+    }
+
+    func testUsernames() throws {
+        let tagged = try generateUsername(recipe: .plusAddress(email: "me@example.com"))
+        XCTAssertTrue(tagged.hasPrefix("me+") && tagged.hasSuffix("@example.com"))
+        XCTAssertTrue(try generateUsername(recipe: .catchAll(domain: "example.com")).hasSuffix("@example.com"))
+        XCTAssertFalse(try generateUsername(recipe: .word(capitalize: false, number: false)).isEmpty)
+        XCTAssertThrowsError(try generateUsername(recipe: .plusAddress(email: "nope")))
+    }
+
+    /// The vault key sealed with a PIN opens with that PIN only.
+    func testPinSealing() throws {
+        let s = try VaultSession.create(settings: settings, keys: keys, password: password)
+        let sealed = try sealKeyWithPin(key: s.key(), pin: "482915")
+        XCTAssertEqual(try openKeyWithPin(sealed: sealed, pin: "482915"), s.key())
+        XCTAssertThrowsError(try openKeyWithPin(sealed: sealed, pin: "000000")) { e in
+            XCTAssertEqual(e as? CoreError, .WrongPassword)
+        }
+    }
+
+    /// 2fa.directory's list: sites by registrable domain, with their
+    /// instructions.
+    func testTwoFactorDirectory() {
+        let json = #"[["GitHub",{"domain":"github.com","tfa":["totp"],"documentation":"https://docs.github.com/2fa","additional-domains":["gist.github.com"]}],["Bad",{"tfa":["totp"]}]]"#
+        let sites = TwoFactorDirectory.parse(Data(json.utf8))
+        XCTAssertEqual(sites.count, 1)
+        XCTAssertEqual(sites["github.com"]??.absoluteString, "https://docs.github.com/2fa")
+        XCTAssertTrue(TwoFactorDirectory.parse(Data("nope".utf8)).isEmpty)
     }
 }

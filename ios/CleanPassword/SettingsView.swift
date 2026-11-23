@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(Clipboard.copyCodeKey, store: Clipboard.defaults) private var copyCode = true
     @AppStorage(Clipboard.clearKey, store: Clipboard.defaults) private var clearAfter = 90
     @AppStorage(Breaches.settingKey) private var detectCompromised = true
+    @AppStorage(TwoFactorDirectory.settingKey) private var checkTwoFactor = true
     @State private var importing = false
     @State private var importText: String?
     @State private var importPassword = ""
@@ -55,11 +56,17 @@ struct SettingsView: View {
                     Text("1 hour").tag(3600)
                 }
                 NavigationLink("Change Master Password") { ChangePasswordView() }
+                if store.pinOn {
+                    Button("Turn Off PIN Unlock", role: .destructive) { Task { try? await store.setPin(nil) } }
+                } else {
+                    NavigationLink("Set Up PIN Unlock") { PinSetupView() }
+                }
                 Toggle("Detect Compromised Passwords", isOn: $detectCompromised)
+                Toggle("Find Sites That Offer Two-Factor", isOn: $checkTwoFactor)
             } header: {
                 Text("Security")
             } footer: {
-                Text("Compromised passwords are found by checking the start of each password's hash (never the password) against Have I Been Pwned's list of leaked passwords.")
+                Text("Compromised passwords are found by checking the start of each password's hash (never the password) against Have I Been Pwned's list of leaked passwords. Sites that offer verification codes come from 2fa.directory's public list, downloaded whole.")
             }
             Section {
                 Button("Turn On AutoFill…") {
@@ -81,6 +88,14 @@ struct SettingsView: View {
                 Text("AutoFill")
             } footer: {
                 Text("In Settings → General → AutoFill & Passwords, turn on CleanPassword. Suggestions show user names and websites (never passwords) to iOS so it can offer them above the keyboard. Filling a login with a verification code copies its code, ready for the site's next step.")
+            }
+            Section {
+                Label("Turn on CleanPassword in Settings → Apps → Safari → Extensions, and allow it on all websites.", systemImage: "safari")
+                    .font(.footnote)
+            } header: {
+                Text("Safari Extension")
+            } footer: {
+                Text("In Safari, CleanPassword can also offer to save a login after you sign up or sign in, and fill cards and identities, from the puzzle-piece menu. It keeps its own copy of the vault: set it up there with the same S3 folder and master password.")
             }
             Section {
                 Toggle("Show Website Icons", isOn: $siteIcons)
@@ -248,5 +263,53 @@ struct ChangePasswordView: View {
             .disabled(current.isEmpty || new.isEmpty)
         }
         .navigationTitle("Master Password")
+    }
+}
+
+/// Choosing a PIN to unlock with on this iPhone (and in AutoFill), as
+/// Bitwarden offers: quicker than the master password where Face ID isn't
+/// wanted. Five wrong PINs turn it off.
+struct PinSetupView: View {
+    @EnvironmentObject private var store: VaultStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var pin = ""
+    @State private var again = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    private var valid: Bool { pin.count >= 6 && pin.allSatisfy(\.isNumber) && pin == again }
+
+    var body: some View {
+        Form {
+            Section {
+                SecureField("PIN", text: $pin).keyboardType(.numberPad).textContentType(.oneTimeCode)
+                SecureField("PIN again", text: $again).keyboardType(.numberPad).textContentType(.oneTimeCode)
+            } footer: {
+                Text("At least 6 digits. The PIN unlocks CleanPassword on this iPhone only; after \(PinKey.maxAttempts) wrong PINs it's turned off and your master password is needed. Someone with your unlocked phone and enough time could guess a short PIN: prefer \(BiometricKey.biometryName) where you can.")
+            }
+            if !again.isEmpty && pin != again {
+                Section { Text("The PINs don't match.").foregroundStyle(.red) }
+            }
+            if let error { Section { Text(error).foregroundStyle(.red) } }
+            Section {
+                Button {
+                    Task {
+                        busy = true
+                        defer { busy = false }
+                        do {
+                            try await store.setPin(pin)
+                            dismiss()
+                        } catch {
+                            self.error = message(error)
+                        }
+                    }
+                } label: {
+                    HStack { Text("Turn On PIN Unlock"); Spacer(); if busy { ProgressView() } }
+                }
+                .disabled(!valid || busy)
+            }
+        }
+        .navigationTitle("PIN Unlock")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -518,7 +518,7 @@ function finishPasskey(token: string, answer: PasskeyAnswer): void {
   if (!r) return;
   passkeyRequests.delete(token);
   r.resolve(answer);
-  if (r.windowId !== undefined) void chrome.windows.remove(r.windowId).catch(() => {});
+  if (r.windowId !== undefined) void chrome.windows?.remove(r.windowId).catch(() => {});
 }
 
 /** Whether two refs are the same document (as far as Chrome said). */
@@ -582,7 +582,7 @@ async function webauthn(frame: FrameRef, msg: Msg): Promise<PasskeyAnswer> {
       .create({ url: chrome.runtime.getURL("passkey.html#" + t), type: "popup", width: 420, height: 560, focused: true })
       .then((w) => {
         if (passkeyRequests.has(t)) req.windowId = w?.id;
-        else if (w?.id !== undefined) void chrome.windows.remove(w.id).catch(() => {});
+        else if (w?.id !== undefined) void chrome.windows?.remove(w.id).catch(() => {});
       })
       // No window, no way to answer: Chrome's own passkeys instead (and the
       // tab isn't left blocked by a request no one can see).
@@ -590,7 +590,7 @@ async function webauthn(frame: FrameRef, msg: Msg): Promise<PasskeyAnswer> {
   });
 }
 
-chrome.windows.onRemoved.addListener((windowId) => {
+chrome.windows?.onRemoved.addListener((windowId) => {
   for (const [t, r] of passkeyRequests) if (r.windowId === windowId) finishPasskey(t, NOT_ALLOWED);
 });
 
@@ -775,7 +775,9 @@ async function openPopup(): Promise<void> {
   try {
     await chrome.action.openPopup();
   } catch {
-    await chrome.windows.create({ url: chrome.runtime.getURL("popup.html?window=1"), type: "popup", width: 380, height: 600 });
+    // Safari on iOS has no windows: a tab instead.
+    if (chrome.windows) await chrome.windows.create({ url: chrome.runtime.getURL("popup.html?window=1"), type: "popup", width: 380, height: 600 });
+    else await chrome.tabs.create({ url: chrome.runtime.getURL("popup.html") });
   }
 }
 
@@ -835,6 +837,8 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     }
     case "generate":
       return core.generatePassword(msg.recipe as Recipe);
+    case "generate-username":
+      return core.generateUsername(msg.recipe as object);
     case "passkey-state":
       return passkeyState(String(msg.token));
     case "passkey-answer":
@@ -1043,7 +1047,8 @@ chrome.alarms.onAlarm.addListener(async (a) => {
   }
 });
 
-chrome.idle.onStateChanged.addListener(async (state) => {
+// Not in Safari on iOS (nor windows, commands and context menus below).
+chrome.idle?.onStateChanged.addListener(async (state) => {
   if (state === "locked" && (await settings()).lockOnIdle) await lock();
 });
 
@@ -1071,7 +1076,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 /** Keyboard shortcuts and context-menu commands given, by tab. */
 const commandsIssued = new Map<number, { which: string; at: number }>();
 
-chrome.commands.onCommand.addListener(async (command, tab) => {
+chrome.commands?.onCommand.addListener(async (command, tab) => {
   if (!tab?.id || (command !== "fill" && command !== "generate")) return;
   commandsIssued.set(tab.id, { which: command, at: Date.now() });
   // Each frame checks whether it has the focus; that one answers.
@@ -1079,11 +1084,11 @@ chrome.commands.onCommand.addListener(async (command, tab) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({ id: "fill", title: "Fill login", contexts: ["editable"] });
-  chrome.contextMenus.create({ id: "generate", title: "Fill a strong password", contexts: ["editable"] });
+  chrome.contextMenus?.create({ id: "fill", title: "Fill login", contexts: ["editable"] });
+  chrome.contextMenus?.create({ id: "generate", title: "Fill a strong password", contexts: ["editable"] });
 });
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+chrome.contextMenus?.onClicked.addListener(async (info, tab) => {
   if (!tab?.id) return;
   commandsIssued.set(tab.id, { which: String(info.menuItemId), at: Date.now() });
   await chrome.tabs.sendMessage(tab.id, { type: "command", which: info.menuItemId }, { frameId: info.frameId ?? 0 }).catch(() => null);

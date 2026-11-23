@@ -187,6 +187,24 @@ final class ExtensionModel: ObservableObject {
         }
     }
 
+    var pinOn: Bool { info.map { PinKey.exists(vaultId: $0.vaultId) } ?? false }
+
+    /// Unlocks with the PIN set up in the app.
+    func unlock(pin: String) async {
+        guard let saved = SavedVault.load(), let id = info?.vaultId else { return }
+        let outcome = await Task.detached { PinKey.unlock(pin: pin, vaultId: id) }.value
+        guard case .key(let key) = outcome else {
+            error = PinKey.explain(outcome)
+            return
+        }
+        do {
+            let s = try await Task.detached { try VaultSession.unlockWithKey(saved: saved, key: key) }.value
+            await opened(s, from: saved)
+        } catch {
+            self.error = message(error)
+        }
+    }
+
     /// The saved vault as this extension opened or last wrote it: anything
     /// else on disk was saved by the app meanwhile, and is merged in.
     private var lastSaved: String?
@@ -394,8 +412,11 @@ struct NewLoginForm: View {
     var body: some View {
         Form {
             Section {
-                TextField("User name or email", text: $user)
-                    .textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                HStack {
+                    TextField("User name or email", text: $user)
+                        .textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    UsernameMenu(username: $user)
+                }
                 HStack {
                     Text(password).font(.body.monospaced()).textSelection(.enabled)
                     Spacer()
@@ -428,6 +449,7 @@ struct ExtensionView: View {
     @State private var query = ""
     @State private var busy = false
     @State private var target = ""
+    @State private var usePin = false
 
     var body: some View {
         NavigationStack {
@@ -478,8 +500,9 @@ struct ExtensionView: View {
         VStack(spacing: 16) {
             Image(systemName: unlockIcon).font(.largeTitle).foregroundStyle(.tint)
             Text(unlockTitle).font(.headline).multilineTextAlignment(.center)
-            SecureField("Master password", text: $password)
-                .textContentType(.password)
+            SecureField(usePin ? "PIN" : "Master password", text: $password)
+                .textContentType(usePin ? .oneTimeCode : .password)
+                .keyboardType(usePin ? .numberPad : .default)
                 .padding(12)
                 .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
                 .onSubmit { Task { await unlock() } }
@@ -491,6 +514,13 @@ struct ExtensionView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(password.isEmpty || busy)
+            if model.pinOn || usePin {
+                Button(usePin ? "Use Master Password" : "Use PIN") {
+                    usePin.toggle()
+                    password = ""
+                    model.error = nil
+                }
+            }
             Spacer()
         }
         .padding(24)
@@ -498,7 +528,8 @@ struct ExtensionView: View {
 
     private func unlock() async {
         busy = true
-        await model.unlock(password: password)
+        if usePin { await model.unlock(pin: password) } else { await model.unlock(password: password) }
+        password = ""
         busy = false
     }
 

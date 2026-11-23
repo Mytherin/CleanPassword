@@ -20,6 +20,9 @@ struct ItemEditView: View {
     @State private var f: ItemFields
     @State private var websites: [Site]
     @State private var custom: [Field]
+    /// A card's or identity's details, by label (the item fields they're
+    /// kept in).
+    @State private var details: [String: String]
 
     struct Site: Identifiable {
         let id = UUID()
@@ -46,108 +49,48 @@ struct ItemEditView: View {
         let fields = draft?.edited ?? item?.fields ?? .empty()
         _f = State(initialValue: fields)
         _websites = State(initialValue: fields.websites.isEmpty ? [Site(uri: "")] : fields.websites.map { Site(uri: $0.uri, matching: $0.matching) })
-        _custom = State(initialValue: fields.fields.map { Field(name: $0.name, value: $0.value, hidden: $0.hidden) })
+        let labels = Set(itemDetails(kind: fields.kind).map(\.label))
+        _custom = State(initialValue: fields.fields.filter { !labels.contains($0.name) }.map { Field(name: $0.name, value: $0.value, hidden: $0.hidden) })
+        _details = State(initialValue: Dictionary(fields.fields.filter { labels.contains($0.name) }.map { ($0.name, $0.value) }, uniquingKeysWith: { a, _ in a }))
     }
 
+    private static let numeric: Set<String> = ["Number", "Expiry month", "Expiry year", "Security code"]
+
+    private var kindName: String {
+        switch f.kind {
+        case .login: return "login"
+        case .note: return "note"
+        case .wifi: return "Wi-Fi network"
+        case .card: return "card"
+        case .identity: return "identity"
+        }
+    }
+
+    // The body is split into sections: in one expression, it's more than
+    // the compiler will type-check.
     var body: some View {
+        editor
+            .onAppear { keepDraft() }
+            .onChange(of: f) { _, _ in keepDraft() }
+            .onChange(of: websites.map(\.uri)) { _, _ in keepDraft() }
+            .onChange(of: websites.map(\.matching)) { _, _ in keepDraft() }
+            .onChange(of: custom.map { [$0.name, $0.value, $0.hidden ? "1" : ""] }) { _, _ in keepDraft() }
+            .onChange(of: details) { _, _ in keepDraft() }
+            .onDisappear {
+                // Cancelled or saved: forget the draft. Locked: keep it.
+                if store.phase == .unlocked { store.editing = nil }
+            }
+    }
+
+    private var editor: some View {
         Form {
-            Section {
-                Picker("Kind", selection: $f.kind) {
-                    Text("Login").tag(Kind.login)
-                    Text("Secure Note").tag(Kind.note)
-                    Text("Wi-Fi Network").tag(Kind.wifi)
-                }
-                TextField(f.kind == .wifi ? "Network name" : "Name", text: $f.name)
-                    .autocorrectionDisabled(f.kind == .wifi)
-            } footer: {
-                if f.kind != .login && original.kind == .login && hasLoginFields {
-                    Text(f.kind == .wifi
-                        ? "The user name, websites and verification code are removed when you save it as a Wi-Fi network."
-                        : "The user name, password, websites and verification code are removed when you save it as a note.")
-                }
-            }
-            if f.kind != .note {
-                Section {
-                    if f.kind == .login {
-                        TextField("User name or email", text: $f.username).textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    }
-                    HStack {
-                        Group {
-                            if showPassword { TextField("Password", text: $f.password) } else { SecureField("Password", text: $f.password) }
-                        }
-                        .textInputAutocapitalization(.never).autocorrectionDisabled().font(.body.monospaced())
-                        Button { showPassword.toggle() } label: { Image(systemName: showPassword ? "eye.slash" : "eye") }.buttonStyle(.borderless)
-                            .accessibilityLabel(showPassword ? "Hide Password" : "Show Password")
-                        Button {
-                            f.password = generated() ?? f.password
-                            showPassword = true
-                        } label: { Image(systemName: "dice") }.buttonStyle(.borderless)
-                            .accessibilityLabel("Generate Password")
-                    }
-                    if !f.password.isEmpty { StrengthMeter(password: f.password) }
-                }
-            }
-            if f.kind == .login {
-                Section {
-                    ForEach($websites) { $site in
-                        HStack {
-                            TextField("https://example.com", text: $site.uri).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                            Menu {
-                                Picker("Match", selection: $site.matching) {
-                                    ForEach(Self.matchings, id: \.0) { m in Text(m.1).tag(m.0) }
-                                }
-                            } label: {
-                                Image(systemName: site.matching == .default ? "link" : site.matching == .never ? "link.badge.minus" : "link.badge.plus")
-                            }
-                            .accessibilityLabel("Matching")
-                        }
-                    }
-                    .onDelete { websites.remove(atOffsets: $0) }
-                    Button("Add Website") { websites.append(Site(uri: "")) }
-                } header: {
-                    Text("Websites")
-                } footer: {
-                    if let m = websites.first(where: { $0.matching != .default })?.matching, let name = Self.matchings.first(where: { $0.0 == m })?.1 {
-                        Text("A website marked with a badge matches by “\(name)” instead of the site's domain.")
-                    }
-                }
-                Section {
-                    HStack {
-                        TextField("otpauth://… or the setup key", text: $f.totp).textInputAutocapitalization(.never).autocorrectionDisabled()
-                        Button { scanning = true } label: { Image(systemName: "qrcode.viewfinder") }.buttonStyle(.borderless)
-                            .accessibilityLabel("Scan QR Code")
-                    }
-                } header: {
-                    Text("Verification Code")
-                } footer: {
-                    if totpInvalid { Text("That isn't a valid setup key.").foregroundStyle(.red) }
-                }
-            }
-            Section {
-                ForEach($custom) { $field in
-                    VStack(alignment: .leading, spacing: 6) {
-                        TextField("Label", text: $field.name).font(.subheadline)
-                        HStack {
-                            Group {
-                                if field.hidden { SecureField("Value", text: $field.value) } else { TextField("Value", text: $field.value) }
-                            }
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            Button { field.hidden.toggle() } label: { Image(systemName: field.hidden ? "eye.slash" : "eye") }.buttonStyle(.borderless)
-                                .accessibilityLabel(field.hidden ? "Hidden Field" : "Visible Field")
-                        }
-                    }
-                }
-                .onDelete { custom.remove(atOffsets: $0) }
-                Button("Add Field") { custom.append(Field(name: "", value: "", hidden: false)) }
-            } header: {
-                Text("Fields")
-            } footer: {
-                if !custom.isEmpty { Text("Tap the eye to hide a field's value, as for a password.") }
-            }
-            Section {
-                TextField("Folder", text: $f.folder)
-                Toggle("Favorite", isOn: $f.favorite)
-            }
+            kindSection
+            detailsSection
+            passwordSection
+            websitesSection
+            codeSection
+            fieldsSection
+            folderSection
             Section("Notes") {
                 TextEditor(text: $f.notes).frame(minHeight: 90)
             }
@@ -172,14 +115,191 @@ struct ItemEditView: View {
             store.editorCodeLink = nil
             useCode(link)
         }
-        .onAppear { keepDraft() }
-        .onChange(of: f) { _, _ in keepDraft() }
-        .onChange(of: websites.map(\.uri)) { _, _ in keepDraft() }
-        .onChange(of: websites.map(\.matching)) { _, _ in keepDraft() }
-        .onChange(of: custom.map { [$0.name, $0.value, $0.hidden ? "1" : ""] }) { _, _ in keepDraft() }
-        .onDisappear {
-            // Cancelled or saved: forget the draft. Locked: keep it.
-            if store.phase == .unlocked { store.editing = nil }
+    }
+
+    private var kindSection: some View {
+        Section {
+            Picker("Kind", selection: $f.kind) {
+                Text("Login").tag(Kind.login)
+                Text("Secure Note").tag(Kind.note)
+                Text("Wi-Fi Network").tag(Kind.wifi)
+                Text("Card").tag(Kind.card)
+                Text("Identity").tag(Kind.identity)
+            }
+            TextField(f.kind == .wifi ? "Network name" : "Name", text: $f.name)
+                .autocorrectionDisabled(f.kind == .wifi)
+        } footer: {
+            if let warning = kindWarning { Text(warning) }
+        }
+    }
+
+    private var kindWarning: String? {
+        guard f.kind != .login && original.kind == .login && hasLoginFields else { return nil }
+        if f.kind == .wifi { return "The user name, websites and verification code are removed when you save it as a Wi-Fi network." }
+        return "The user name, password, websites and verification code are removed when you save it as a \(kindName)."
+    }
+
+    @ViewBuilder
+    private var detailsSection: some View {
+        if f.kind == .card || f.kind == .identity {
+            Section(f.kind == .card ? "Card" : "Identity") {
+                ForEach(itemDetails(kind: f.kind), id: \.label) { spec in
+                    detailField(spec)
+                }
+            }
+        }
+    }
+
+    private func detailField(_ spec: DetailSpec) -> some View {
+        let text = Binding(get: { details[spec.label] ?? "" }, set: { details[spec.label] = $0 })
+        return TextField(spec.label, text: text)
+            .keyboardType(Self.keyboard(for: spec.label))
+            .textInputAutocapitalization(spec.label == "Email" ? .never : .words)
+            .autocorrectionDisabled()
+            .font(spec.hidden ? .body.monospaced() : .body)
+    }
+
+    private static func keyboard(for label: String) -> UIKeyboardType {
+        if numeric.contains(label) { return .numberPad }
+        switch label {
+        case "Email": return .emailAddress
+        case "Phone": return .phonePad
+        default: return .default
+        }
+    }
+
+    @ViewBuilder
+    private var passwordSection: some View {
+        if f.kind == .login || f.kind == .wifi {
+            Section {
+                if f.kind == .login {
+                    HStack {
+                        TextField("User name or email", text: $f.username).textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        UsernameMenu(username: $f.username)
+                    }
+                }
+                passwordRow
+                if !f.password.isEmpty { StrengthMeter(password: f.password) }
+            }
+        }
+    }
+
+    private var passwordRow: some View {
+        HStack {
+            Group {
+                if showPassword { TextField("Password", text: $f.password) } else { SecureField("Password", text: $f.password) }
+            }
+            .textInputAutocapitalization(.never).autocorrectionDisabled().font(.body.monospaced())
+            Button { showPassword.toggle() } label: { Image(systemName: showPassword ? "eye.slash" : "eye") }.buttonStyle(.borderless)
+                .accessibilityLabel(showPassword ? "Hide Password" : "Show Password")
+            Button {
+                f.password = generated() ?? f.password
+                showPassword = true
+            } label: { Image(systemName: "dice") }.buttonStyle(.borderless)
+                .accessibilityLabel("Generate Password")
+        }
+    }
+
+    @ViewBuilder
+    private var websitesSection: some View {
+        if f.kind == .login {
+            Section {
+                ForEach($websites) { $site in
+                    websiteRow($site)
+                }
+                .onDelete { websites.remove(atOffsets: $0) }
+                Button("Add Website") { websites.append(Site(uri: "")) }
+            } header: {
+                Text("Websites")
+            } footer: {
+                if let name = matchingNote {
+                    Text("A website marked with a badge matches by “\(name)” instead of the site's domain.")
+                }
+            }
+        }
+    }
+
+    private var matchingNote: String? {
+        guard let m = websites.first(where: { $0.matching != .default })?.matching else { return nil }
+        return Self.matchings.first(where: { $0.0 == m })?.1
+    }
+
+    private func websiteRow(_ site: Binding<Site>) -> some View {
+        HStack {
+            TextField("https://example.com", text: site.uri).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+            Menu {
+                Picker("Match", selection: site.matching) {
+                    ForEach(Self.matchings, id: \.0) { m in Text(m.1).tag(m.0) }
+                }
+            } label: {
+                Image(systemName: Self.matchingIcon(site.wrappedValue.matching))
+            }
+            .accessibilityLabel("Matching")
+        }
+    }
+
+    private static func matchingIcon(_ m: Matching) -> String {
+        switch m {
+        case .default: return "link"
+        case .never: return "link.badge.minus"
+        default: return "link.badge.plus"
+        }
+    }
+
+    @ViewBuilder
+    private var codeSection: some View {
+        if f.kind == .login {
+            Section {
+                HStack {
+                    TextField("otpauth://… or the setup key", text: $f.totp).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Button { scanning = true } label: { Image(systemName: "qrcode.viewfinder") }.buttonStyle(.borderless)
+                        .accessibilityLabel("Scan QR Code")
+                }
+            } header: {
+                Text("Verification Code")
+            } footer: {
+                if totpInvalid { Text("That isn't a valid setup key.").foregroundStyle(.red) }
+            }
+        }
+    }
+
+    private var fieldsSection: some View {
+        Section {
+            ForEach($custom) { $field in
+                customRow($field)
+            }
+            .onDelete { custom.remove(atOffsets: $0) }
+            Button("Add Field") { custom.append(Field(name: "", value: "", hidden: false)) }
+        } header: {
+            Text("Fields")
+        } footer: {
+            if !custom.isEmpty { Text("Tap the eye to hide a field's value, as for a password.") }
+        }
+    }
+
+    private func customRow(_ field: Binding<Field>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("Label", text: field.name).font(.subheadline)
+            HStack {
+                Group {
+                    if field.wrappedValue.hidden { SecureField("Value", text: field.value) } else { TextField("Value", text: field.value) }
+                }
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button { field.wrappedValue.hidden.toggle() } label: { Image(systemName: field.wrappedValue.hidden ? "eye.slash" : "eye") }.buttonStyle(.borderless)
+                    .accessibilityLabel(field.wrappedValue.hidden ? "Hidden Field" : "Visible Field")
+            }
+        }
+    }
+
+    private var folderSection: some View {
+        Section {
+            TextField("Folder", text: $f.folder)
+            Toggle("Favorite", isOn: $f.favorite)
+            Toggle("Ask for \(BiometricKey.biometryName) to Show", isOn: $f.reprompt)
+        } footer: {
+            if f.reprompt {
+                Text("Its password, code and hidden fields are shown or copied only after \(BiometricKey.biometryName) or your passcode, even while CleanPassword is unlocked.")
+            }
         }
     }
 
@@ -227,13 +347,19 @@ struct ItemEditView: View {
             let uri = site.uri.trimmingCharacters(in: .whitespaces)
             return uri.isEmpty ? nil : Website(uri: uri, matching: site.matching)
         }
-        fields.fields = custom.filter { !$0.name.isEmpty || !$0.value.isEmpty }.map { CustomField(name: $0.name, value: $0.value, hidden: $0.hidden) }
+        // A card's or identity's details first, in their order, then the
+        // custom fields.
+        let detailFields = itemDetails(kind: f.kind).compactMap { spec -> CustomField? in
+            let value = (details[spec.label] ?? "").trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : CustomField(name: spec.label, value: value, hidden: spec.hidden)
+        }
+        fields.fields = detailFields + custom.filter { !$0.name.isEmpty || !$0.value.isEmpty }.map { CustomField(name: $0.name, value: $0.value, hidden: $0.hidden) }
         fields.totp = fields.totp.trimmingCharacters(in: .whitespaces)
         return Self.stripped(fields)
     }
 
     /// Without the fields the kind doesn't have: only logins have user
-    /// names, websites and codes; notes no password either.
+    /// names, websites and codes; only they and networks have passwords.
     static func stripped(_ f: ItemFields) -> ItemFields {
         var fields = f
         if fields.kind != .login {
@@ -241,7 +367,7 @@ struct ItemEditView: View {
             fields.websites = []
             fields.totp = ""
         }
-        if fields.kind == .note { fields.password = "" }
+        if fields.kind != .login && fields.kind != .wifi { fields.password = "" }
         return fields
     }
 
@@ -264,7 +390,7 @@ struct ItemEditView: View {
         return ItemFields(
             kind: pick(\.kind), name: pick(\.name), username: pick(\.username), password: pick(\.password),
             websites: pick(\.websites), totp: pick(\.totp), notes: pick(\.notes), folder: pick(\.folder),
-            favorite: pick(\.favorite), fields: pick(\.fields))
+            favorite: pick(\.favorite), reprompt: pick(\.reprompt), fields: pick(\.fields))
     }
 
     private func save() async {

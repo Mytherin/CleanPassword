@@ -82,6 +82,11 @@ struct PasswordsView: View {
                     tile(.passkeys, count: store.items.filter { !$0.passkeys.isEmpty }.count)
                     tile(.codes, count: store.items.filter { !$0.fields.totp.isEmpty }.count)
                     tile(.wifi, count: store.items.filter { $0.fields.kind == .wifi }.count)
+                    // Shown once there are any, as most people keep none here.
+                    let cards = store.items.filter { $0.fields.kind == .card }.count
+                    if cards > 0 { tile(.cards, count: cards) }
+                    let identities = store.items.filter { $0.fields.kind == .identity }.count
+                    if identities > 0 { tile(.identities, count: identities) }
                     tile(.security, count: store.findings.filter { f in !HiddenRecommendations.isHidden(store.items.first { $0.id == f.id }, in: hidden) }.count)
                     tile(.deleted, count: store.trash.count)
                     tile(.favorites, count: store.items.filter { $0.fields.favorite }.count)

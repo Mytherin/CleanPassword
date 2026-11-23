@@ -327,8 +327,33 @@ function matchRow(m: Match): HTMLElement {
     monogram(m.name), h("span", { class: "text" }, h("div", { class: "title" }, m.name), h("div", { class: "sub" }, m.username || "No user name")), fill);
 }
 
+/// A card's or identity's details: the item fields they're kept in, and
+/// whether they're hidden (as the core's CARD_DETAILS / IDENTITY_DETAILS).
+const DETAILS: Partial<Record<Item["kind"], [string, boolean][]>> = {
+  card: [["Cardholder name", false], ["Brand", false], ["Number", true], ["Expiry month", false], ["Expiry year", false], ["Security code", true]],
+  identity: [
+    ["Title", false], ["First name", false], ["Middle name", false], ["Last name", false], ["Company", false], ["Email", false], ["Phone", false],
+    ["Address line 1", false], ["Address line 2", false], ["Address line 3", false], ["City", false], ["State or province", false], ["Postal code", false],
+    ["Country", false], ["User name", false], ["Social security number", true], ["Passport number", true], ["License number", true],
+  ],
+};
+
+function subtitle(i: Item): string {
+  const field = (name: string) => i.fields.find((f) => f.name === name)?.value ?? "";
+  switch (i.kind) {
+    case "note": return "Secure note";
+    case "wifi": return "Wi-Fi network";
+    case "card": {
+      const n = field("Number").replace(/\D/g, "");
+      return n.length >= 4 ? `Card •••• ${n.slice(-4)}` : "Card";
+    }
+    case "identity": return [field("First name"), field("Last name")].filter(Boolean).join(" ") || field("Email") || "Identity";
+    default: return i.username || hostOf(i.uris[0]?.uri) || "";
+  }
+}
+
 function itemRow(i: Item): HTMLElement {
-  const sub = i.kind === "note" ? "Secure note" : i.kind === "wifi" ? "Wi-Fi network" : i.username || hostOf(i.uris[0]?.uri) || "";
+  const sub = subtitle(i);
   return h("button", { class: "row", onclick: () => void detail(i.id) },
     monogram(i.name), h("span", { class: "text" }, h("div", { class: "title" }, i.name), h("div", { class: "sub" }, sub)),
     i.folder ? h("span", { class: "pill" }, i.folder) : null);
@@ -451,7 +476,7 @@ function edit(item: Item | null): void {
   const d: ItemData = item
     ? { kind: item.kind, name: item.name, username: item.username, password: item.password, uris: item.uris, totp: item.totp, notes: item.notes, folder: item.folder, favorite: item.favorite, fields: item.fields }
     : { kind: "login", name: "", username: "", password: "", uris: [], totp: "", notes: "", folder: "", favorite: false, fields: [] };
-  const kind = h("select", {}, h("option", { value: "login" }, "Login"), h("option", { value: "note" }, "Secure note"), h("option", { value: "wifi" }, "Wi-Fi network"));
+  const kind = h("select", {}, h("option", { value: "login" }, "Login"), h("option", { value: "note" }, "Secure note"), h("option", { value: "wifi" }, "Wi-Fi network"), h("option", { value: "card" }, "Card"), h("option", { value: "identity" }, "Identity"));
   kind.value = d.kind;
   const name = input({ value: d.name, placeholder: "Name" });
   const username = input({ value: d.username, placeholder: "User name or email" });
@@ -484,18 +509,40 @@ function edit(item: Item | null): void {
   const err = errorBox();
   const save = h("button", { class: "btn primary", type: "submit" }, "Save");
   const passwordRow = h("label", {}, "Password", h("div", { class: "inline" }, password, reveal, gen), meter.el);
-  const loginOnly = [h("label", {}, "User name", username), h("label", {}, "Websites", uris, h("button", { class: "link small", type: "button", style: "align-self:flex-start", onclick: () => addUri() }, "Add website")), h("label", {}, "One-time code (TOTP)", totp)];
-  // Logins have everything; a Wi-Fi network only its name and password; a
-  // note neither.
+  // A random user name: a word, or a tagged address when an email is typed
+  // there (me@example.com → me+k3x9q2va@example.com).
+  const genUser = h("button", { class: "btn small", type: "button", title: "Generate a user name", onclick: async () => {
+    const typed = username.value.trim();
+    const recipe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(typed) ? { kind: "plusAddress", email: typed } : { kind: "word", capitalize: false, number: true };
+    username.value = await ask<string>("generate-username", { recipe });
+  } }, "Generate");
+  const loginOnly = [h("label", {}, "User name", h("div", { class: "inline" }, username, genUser)),h("label", {}, "Websites", uris, h("button", { class: "link small", type: "button", style: "align-self:flex-start", onclick: () => addUri() }, "Add website")), h("label", {}, "One-time code (TOTP)", totp)];
+  // A card's or identity's details, one input each (kept across kind changes).
+  const detailInputs = new Map<string, HTMLInputElement>();
+  const detailBox = h("div", { style: "display:flex; flex-direction:column; gap:8px" });
+  const detailSpecs = () => DETAILS[kind.value as Item["kind"]] ?? [];
+  const drawDetails = () => {
+    detailBox.replaceChildren(...detailSpecs().map(([label, hidden]) => {
+      let i = detailInputs.get(label);
+      if (!i) {
+        i = input({ value: d.fields.find((f) => f.name === label)?.value ?? "", placeholder: label, type: hidden ? "password" : "text", autocomplete: "off" });
+        detailInputs.set(label, i);
+      }
+      return h("label", {}, label, i);
+    }));
+  };
+  // Logins have everything; a Wi-Fi network only its name and password;
+  // cards and identities their details; a note none of these.
   const sync = () => {
     loginOnly.forEach((n) => (n.style.display = kind.value === "login" ? "" : "none"));
-    passwordRow.style.display = kind.value === "note" ? "none" : "";
+    passwordRow.style.display = kind.value === "login" || kind.value === "wifi" ? "" : "none";
     name.placeholder = kind.value === "wifi" ? "Network name" : "Name";
+    drawDetails();
   };
   kind.addEventListener("change", sync);
   sync();
   const form = h("form", { class: "form" },
-    h("label", {}, "Kind", kind), h("label", {}, "Name", name), loginOnly[0], passwordRow, ...loginOnly.slice(1),
+    h("label", {}, "Kind", kind), h("label", {}, "Name", name), detailBox, loginOnly[0], passwordRow, ...loginOnly.slice(1),
     h("label", {}, "Folder", folder, folders), h("label", { class: "check" }, favorite, "Favorite"), h("label", {}, "Notes", notes),
     err, h("div", { style: "display:flex; justify-content:flex-end; gap:8px" }, save),
   );
@@ -514,9 +561,17 @@ function edit(item: Item | null): void {
         favorite: favorite.checked,
         notes: notes.value,
       };
-      // Only logins have user names, websites and codes; notes no password.
+      // Only logins have user names, websites and codes; only they and
+      // networks have passwords.
       if (data.kind !== "login") Object.assign(data, { username: "", uris: [], totp: "" });
-      if (data.kind === "note") data.password = "";
+      if (data.kind !== "login" && data.kind !== "wifi") data.password = "";
+      // A card's or identity's details first, then the other fields.
+      const specs = detailSpecs();
+      const labels = new Set(specs.map(([label]) => label));
+      const details = specs
+        .map(([label, hidden]) => ({ name: label, value: (detailInputs.get(label)?.value ?? "").trim(), hidden }))
+        .filter((f) => f.value);
+      data.fields = [...details, ...d.fields.filter((f) => !labels.has(f.name))];
       if (item) {
         await ask("update", { id: item.id, data });
         await detail(item.id);

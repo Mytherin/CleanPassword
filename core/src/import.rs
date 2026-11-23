@@ -99,6 +99,8 @@ struct BwItem {
     name: Option<String>,
     notes: Option<String>,
     favorite: bool,
+    /// 1: asks for the master password again before showing secrets.
+    reprompt: u32,
     folder_id: Option<String>,
     fields: Option<Vec<BwField>>,
     login: Option<BwLogin>,
@@ -199,6 +201,7 @@ fn convert(export: BwExport) -> Imported {
             name: bw.name.unwrap_or_default(),
             notes: bw.notes.unwrap_or_default(),
             favorite: bw.favorite,
+            reprompt: bw.reprompt == 1,
             folder: bw.folder_id.and_then(|id| folders.get(&id).cloned()).unwrap_or_default(),
             ..Default::default()
         };
@@ -225,20 +228,32 @@ fn convert(export: BwExport) -> Imported {
                     }
                 }
             }
-            3..=5 => {
+            3 | 4 => {
+                // Cards and identities: their details first, in the order
+                // the apps show them, then the custom fields.
+                d.kind = if bw.kind == 3 { ItemKind::Card } else { ItemKind::Identity };
+                let mut details = (if bw.kind == 3 { bw.card } else { bw.identity }).unwrap_or_default();
+                let mut out: Vec<Field> = Vec::new();
+                for spec in d.kind.details() {
+                    if let Some(value) = details.remove(spec.key).and_then(text) {
+                        out.push(Field { name: spec.label.into(), value, hidden: spec.hidden });
+                    }
+                }
+                // Anything else Bitwarden has on them.
+                for (k, v) in details {
+                    if let Some(value) = text(v) {
+                        out.push(Field { name: label(&k), value, hidden: false });
+                    }
+                }
+                out.append(&mut d.fields);
+                d.fields = out;
+            }
+            5 => {
                 d.kind = ItemKind::Note;
-                let (details, hidden): (Option<Map<String, Value>>, &[&str]) = match bw.kind {
-                    3 => (bw.card, &["number", "code"]),
-                    4 => (bw.identity, &["ssn", "passportNumber", "licenseNumber"]),
-                    _ => (bw.ssh_key, &["privateKey"]),
-                };
-                for (k, v) in details.unwrap_or_default() {
-                    let value = match v {
-                        Value::String(s) if !s.is_empty() => s,
-                        Value::Number(n) => n.to_string(),
-                        _ => continue,
-                    };
-                    d.fields.push(Field { name: label(&k), value, hidden: hidden.contains(&k.as_str()) });
+                for (k, v) in bw.ssh_key.unwrap_or_default() {
+                    if let Some(value) = text(v) {
+                        d.fields.push(Field { name: label(&k), value, hidden: k == "privateKey" });
+                    }
                 }
             }
             _ => d.kind = ItemKind::Note,
@@ -263,6 +278,15 @@ fn convert(export: BwExport) -> Imported {
         out.warnings.push(format!("{unusable} passkey(s) weren't imported: they use a kind of key CleanPassword doesn't support yet (only P-256). Keep using them in Bitwarden, or add a new passkey on those sites."));
     }
     out
+}
+
+/// A detail's value as text (`None` if empty or not a value).
+fn text(v: Value) -> Option<String> {
+    match v {
+        Value::String(s) if !s.is_empty() => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 /// `cardholderName` → `Cardholder name`.
@@ -360,6 +384,7 @@ const COLUMNS: &[(&str, &[&str])] = &[
     ("notes", &["notes", "note", "extra", "comments", "comment"]),
     ("folder", &["folder", "grouping", "group", "category", "vault"]),
     ("favorite", &["favorite", "fav", "favourite"]),
+    ("reprompt", &["reprompt"]),
     ("type", &["type"]),
     ("fields", &["fields"]),
 ];
@@ -409,6 +434,7 @@ pub fn csv(text: &str) -> Result<Imported> {
             notes: get("notes"),
             folder: get("folder").replace('\\', "/"),
             favorite: matches!(fav.trim().to_lowercase().as_str(), "1" | "true" | "yes"),
+            reprompt: get("reprompt").trim() == "1",
             fields,
         };
         if d.name.is_empty() && d.username.is_empty() && d.password.is_empty() && d.uris.is_empty() && d.notes.is_empty() {
@@ -431,7 +457,16 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
     let items: Vec<Value> = items
         .iter()
         .map(|i| {
-            let mut fields: Vec<Value> = i.fields.iter().map(|f| json!({"name": f.name, "value": f.value, "type": if f.hidden { 1 } else { 0 }, "linkedId": null})).collect();
+            // A card's or identity's details go in Bitwarden's card or
+            // identity object, not its custom fields.
+            let details = i.kind.details();
+            let is_detail = |f: &Field| details.iter().any(|d| d.label == f.name);
+            let mut fields: Vec<Value> = i
+                .fields
+                .iter()
+                .filter(|f| !is_detail(f))
+                .map(|f| json!({"name": f.name, "value": f.value, "type": if f.hidden { 1 } else { 0 }, "linkedId": null}))
+                .collect();
             if i.kind == ItemKind::Wifi {
                 fields.push(json!({"name": WIFI_PASSWORD_FIELD, "value": i.password, "type": 1, "linkedId": null}));
             }
@@ -440,8 +475,13 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
                 "id": i.id,
                 "organizationId": null,
                 "folderId": folder_ids.get(i.folder.as_str()),
-                "type": if i.kind == ItemKind::Login { 1 } else { 2 },
-                "reprompt": 0,
+                "type": match i.kind {
+                    ItemKind::Login => 1,
+                    ItemKind::Card => 3,
+                    ItemKind::Identity => 4,
+                    ItemKind::Note | ItemKind::Wifi => 2,
+                },
+                "reprompt": u32::from(i.reprompt),
                 "name": i.name,
                 "notes": if i.notes.is_empty() { Value::Null } else { i.notes.clone().into() },
                 "favorite": i.favorite,
@@ -456,6 +496,12 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
                 let uris: Vec<Value> = i.uris.iter().map(|u| json!({"match": match_number(u.match_mode), "uri": u.uri})).collect();
                 let passkeys: Vec<Value> = i.passkeys.iter().map(passkey::to_bitwarden).collect();
                 v["login"] = json!({"uris": uris, "username": i.username, "password": i.password, "totp": if i.totp.is_empty() { Value::Null } else { i.totp.clone().into() }, "fido2Credentials": passkeys});
+            } else if !details.is_empty() {
+                let object: Map<String, Value> = details
+                    .iter()
+                    .filter_map(|d| i.fields.iter().find(|f| f.name == d.label).map(|f| (d.key.to_string(), Value::from(f.value.clone()))))
+                    .collect();
+                v[if i.kind == ItemKind::Card { "card" } else { "identity" }] = Value::Object(object);
             } else {
                 v["secureNote"] = json!({"type": 0});
             }
@@ -499,7 +545,9 @@ mod tests {
         assert_eq!(gh.history[0].password, "older");
         assert_eq!(r.items[1].data.kind, ItemKind::Note);
         let card = &r.items[2].data;
-        assert!(card.fields.iter().any(|f| f.name == "Cardholder name" && !f.hidden));
+        assert_eq!(card.kind, ItemKind::Card);
+        let names: Vec<&str> = card.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Cardholder name", "Number", "Expiry month", "Security code"], "in the order the apps show them");
         assert!(card.fields.iter().any(|f| f.name == "Number" && f.hidden));
         assert_eq!(r.warnings.len(), 1, "passkey warning");
     }
@@ -625,6 +673,7 @@ mod tests {
             name: "Home".into(),
             password: "correct horse".into(),
             notes: "router in the hall".into(),
+            reprompt: true,
             fields: vec![Field { name: "Band".into(), value: "5 GHz".into(), hidden: false }],
             ..Default::default()
         };
@@ -633,5 +682,35 @@ mod tests {
         assert!(exported.contains("\"type\": 2") || exported.contains("\"type\":2"), "a secure note in Bitwarden's terms");
         let back = import_file(&exported, None).unwrap();
         assert_eq!(back.items[0].data, data);
+    }
+
+    /// Cards and identities go out as Bitwarden's types (details in their
+    /// objects, custom fields as fields) and come back the same.
+    #[test]
+    fn cards_and_identities_round_trip() {
+        let f = |name: &str, value: &str, hidden: bool| Field { name: name.into(), value: value.into(), hidden };
+        let identity = ItemData {
+            kind: ItemKind::Identity,
+            name: "Me".into(),
+            fields: vec![f("First name", "Ada", false), f("Email", "ada@example.com", false), f("Passport number", "X123", true), f("Shoe size", "38", false)],
+            ..Default::default()
+        };
+        let card = ItemData {
+            kind: ItemKind::Card,
+            name: "Visa".into(),
+            fields: vec![f("Cardholder name", "Ada L", false), f("Number", "4111111111111111", true), f("Security code", "123", true)],
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let items = [Item::new(identity.clone(), now), Item::new(card.clone(), now)];
+        let exported = export_bitwarden_json(&items.iter().collect::<Vec<_>>());
+        let v: Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(v["items"][0]["type"], 4);
+        assert_eq!(v["items"][0]["identity"]["passportNumber"], "X123");
+        assert_eq!(v["items"][0]["fields"].as_array().unwrap().len(), 1, "only the custom field");
+        assert_eq!(v["items"][1]["card"]["number"], "4111111111111111");
+        let back = import_file(&exported, None).unwrap();
+        assert_eq!(back.items[0].data, identity);
+        assert_eq!(back.items[1].data, card);
     }
 }

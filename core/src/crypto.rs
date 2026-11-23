@@ -102,6 +102,36 @@ pub fn key_from_b64(s: &str) -> Result<Key> {
     Ok(Zeroizing::new(arr))
 }
 
+/// The vault key sealed with a PIN, for unlocking on one device (kept in
+/// its keychain, which forgets it after a few wrong PINs): the PIN's key is
+/// derived as the master password's is, with a salt of its own.
+#[derive(Serialize, Deserialize)]
+struct PinSealed {
+    kdf: KdfParams,
+    data: String,
+}
+
+const PIN_AAD: &[u8] = b"cleanpassword/pin/v1";
+
+pub fn seal_with_pin(key: &Key, pin: &str) -> Result<String> {
+    if pin.chars().count() < 4 {
+        return Err(Error::invalid("the PIN needs at least 4 digits"));
+    }
+    let kdf = KdfParams::new();
+    let pin_key = derive_key(pin, &kdf)?;
+    let data = b64(&seal(&pin_key, PIN_AAD, &key[..]));
+    Ok(serde_json::to_string(&PinSealed { kdf, data }).expect("PIN data serializes"))
+}
+
+/// The vault key, if the PIN is right ([`Error::WrongPassword`] if not).
+pub fn open_with_pin(sealed: &str, pin: &str) -> Result<Key> {
+    let s: PinSealed = serde_json::from_str(sealed).map_err(|_| Error::invalid("the PIN data is damaged"))?;
+    let pin_key = derive_key(pin, &s.kdf)?;
+    let plain = Zeroizing::new(open(&pin_key, PIN_AAD, &unb64(&s.data)?).ok_or(Error::WrongPassword)?);
+    let arr: [u8; 32] = plain.as_slice().try_into().map_err(|_| Error::invalid("the PIN data is damaged"))?;
+    Ok(Zeroizing::new(arr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +178,15 @@ mod tests {
         assert_eq!(pad(vec![b'x'; 256], 256).len(), 256);
         assert_eq!(pad(vec![b'x'; 257], 256).len(), 512);
         assert_eq!(pad(vec![], 256).len(), 256);
+    }
+
+    #[test]
+    fn pin_seals_the_key() {
+        let key = random_key();
+        let sealed = seal_with_pin(&key, "482915").unwrap();
+        assert!(!sealed.contains(&b64(&key[..])));
+        assert_eq!(*open_with_pin(&sealed, "482915").unwrap(), *key);
+        assert!(matches!(open_with_pin(&sealed, "482916"), Err(Error::WrongPassword)));
+        assert!(seal_with_pin(&key, "123").is_err(), "too short");
     }
 }

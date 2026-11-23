@@ -101,6 +101,10 @@ pub enum Kind {
     Note,
     /// A Wi-Fi network: its name is the item's, with its password.
     Wifi,
+    /// A payment card (details as fields: see `item_details`).
+    Card,
+    /// An identity (details as fields: see `item_details`).
+    Identity,
 }
 
 /// How a website is matched (Bitwarden's options).
@@ -140,6 +144,8 @@ pub struct ItemFields {
     pub notes: String,
     pub folder: String,
     pub favorite: bool,
+    /// Asks for Face ID again before its secrets are shown or copied.
+    pub reprompt: bool,
     pub fields: Vec<CustomField>,
 }
 
@@ -315,6 +321,8 @@ impl From<ItemFields> for ItemData {
                 Kind::Login => ItemKind::Login,
                 Kind::Note => ItemKind::Note,
                 Kind::Wifi => ItemKind::Wifi,
+                Kind::Card => ItemKind::Card,
+                Kind::Identity => ItemKind::Identity,
             },
             name: f.name,
             username: f.username,
@@ -324,6 +332,7 @@ impl From<ItemFields> for ItemData {
             notes: f.notes,
             folder: f.folder,
             favorite: f.favorite,
+            reprompt: f.reprompt,
             fields: f.fields.into_iter().map(|c| Field { name: c.name, value: c.value, hidden: c.hidden }).collect(),
         }
     }
@@ -337,6 +346,8 @@ fn item_record(i: &Item) -> VaultItem {
                 ItemKind::Login => Kind::Login,
                 ItemKind::Note => Kind::Note,
                 ItemKind::Wifi => Kind::Wifi,
+                ItemKind::Card => Kind::Card,
+                ItemKind::Identity => Kind::Identity,
             },
             name: i.name.clone(),
             username: i.username.clone(),
@@ -346,6 +357,7 @@ fn item_record(i: &Item) -> VaultItem {
             notes: i.notes.clone(),
             folder: i.folder.clone(),
             favorite: i.favorite,
+            reprompt: i.reprompt,
             fields: i.fields.iter().map(|f| CustomField { name: f.name.clone(), value: f.value.clone(), hidden: f.hidden }).collect(),
         },
         history: i.history.iter().map(|h| OldPassword { password: h.password.clone(), retired: secs(h.retired) }).collect(),
@@ -664,6 +676,61 @@ pub fn locked_vault(saved: String) -> Option<LockedVault> {
     vault::locked_info(&saved).ok().map(|i| LockedVault { settings: (&i.config).into(), vault_id: i.vault_id, last_sync: i.last_sync.map(secs) })
 }
 
+
+/// One detail a card or identity has: kept in the item field named `label`.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct DetailSpec {
+    pub label: String,
+    pub hidden: bool,
+}
+
+/// The details items of a kind have, in the order they're shown (none but
+/// for cards and identities).
+#[uniffi::export]
+pub fn item_details(kind: Kind) -> Vec<DetailSpec> {
+    let kind = match kind {
+        Kind::Card => ItemKind::Card,
+        Kind::Identity => ItemKind::Identity,
+        _ => return Vec::new(),
+    };
+    kind.details().iter().map(|d| DetailSpec { label: d.label.into(), hidden: d.hidden }).collect()
+}
+
+/// How a user name is made (see the core's `UsernameRecipe`).
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum UsernameRecipe {
+    Word { capitalize: bool, number: bool },
+    PlusAddress { email: String },
+    CatchAll { domain: String },
+}
+
+/// A user name: a random word, your email with a random tag, or a random
+/// name at a catch-all domain.
+#[uniffi::export]
+pub fn generate_username(recipe: UsernameRecipe) -> R<String> {
+    let r = match recipe {
+        UsernameRecipe::Word { capitalize, number } => generator::UsernameRecipe::Word { capitalize, number },
+        UsernameRecipe::PlusAddress { email } => generator::UsernameRecipe::PlusAddress { email },
+        UsernameRecipe::CatchAll { domain } => generator::UsernameRecipe::CatchAll { domain },
+    };
+    Ok(generator::generate_username(&r)?)
+}
+
+/// The vault key (`VaultSession::key`) sealed with a PIN, to keep in this
+/// device's keychain for unlocking with the PIN.
+#[uniffi::export]
+pub fn seal_key_with_pin(key: String, pin: String) -> R<String> {
+    let key = cleanpassword_core::crypto::key_from_b64(&key)?;
+    Ok(cleanpassword_core::crypto::seal_with_pin(&key, &pin)?)
+}
+
+/// The vault key from what `seal_key_with_pin` made, if the PIN is right
+/// (`CoreError::WrongPassword` if not).
+#[uniffi::export]
+pub fn open_key_with_pin(sealed: String, pin: String) -> R<String> {
+    let key = cleanpassword_core::crypto::open_with_pin(&sealed, &pin)?;
+    Ok(cleanpassword_core::crypto::b64(&key[..]))
+}
 #[uniffi::export]
 pub fn generate_password(recipe: PasswordRecipe) -> R<String> {
     let r = match recipe {
@@ -729,6 +796,7 @@ mod tests {
             notes: String::new(),
             folder: "Work".into(),
             favorite: false,
+            reprompt: false,
             fields: vec![CustomField { name: "PIN".into(), value: "1234".into(), hidden: true }],
         }
     }
