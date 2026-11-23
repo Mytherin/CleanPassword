@@ -55,6 +55,11 @@ struct SettingsView: View {
                     Text("1 hour").tag(3600)
                 }
                 NavigationLink("Change Master Password") { ChangePasswordView() }
+                if store.pinOn {
+                    Button("Turn Off PIN Unlock", role: .destructive) { Task { try? await store.setPin(nil) } }
+                } else {
+                    NavigationLink("Set Up PIN Unlock") { PinSetupView() }
+                }
                 Toggle("Detect Compromised Passwords", isOn: $detectCompromised)
             } header: {
                 Text("Security")
@@ -248,5 +253,53 @@ struct ChangePasswordView: View {
             .disabled(current.isEmpty || new.isEmpty)
         }
         .navigationTitle("Master Password")
+    }
+}
+
+/// Choosing a PIN to unlock with on this iPhone (and in AutoFill), as
+/// Bitwarden offers: quicker than the master password where Face ID isn't
+/// wanted. Five wrong PINs turn it off.
+struct PinSetupView: View {
+    @EnvironmentObject private var store: VaultStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var pin = ""
+    @State private var again = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    private var valid: Bool { pin.count >= 6 && pin.allSatisfy(\.isNumber) && pin == again }
+
+    var body: some View {
+        Form {
+            Section {
+                SecureField("PIN", text: $pin).keyboardType(.numberPad).textContentType(.oneTimeCode)
+                SecureField("PIN again", text: $again).keyboardType(.numberPad).textContentType(.oneTimeCode)
+            } footer: {
+                Text("At least 6 digits. The PIN unlocks CleanPassword on this iPhone only; after \(PinKey.maxAttempts) wrong PINs it's turned off and your master password is needed. Someone with your unlocked phone and enough time could guess a short PIN: prefer \(BiometricKey.biometryName) where you can.")
+            }
+            if !again.isEmpty && pin != again {
+                Section { Text("The PINs don't match.").foregroundStyle(.red) }
+            }
+            if let error { Section { Text(error).foregroundStyle(.red) } }
+            Section {
+                Button {
+                    Task {
+                        busy = true
+                        defer { busy = false }
+                        do {
+                            try await store.setPin(pin)
+                            dismiss()
+                        } catch {
+                            self.error = message(error)
+                        }
+                    }
+                } label: {
+                    HStack { Text("Turn On PIN Unlock"); Spacer(); if busy { ProgressView() } }
+                }
+                .disabled(!valid || busy)
+            }
+        }
+        .navigationTitle("PIN Unlock")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

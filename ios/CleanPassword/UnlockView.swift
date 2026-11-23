@@ -10,6 +10,9 @@ struct UnlockView: View {
     @FocusState private var focused: Bool
     @Environment(\.scenePhase) private var scenePhase
     @State private var wasInBackground = false
+    /// Unlocking with the PIN (when it's set up) rather than the master
+    /// password.
+    @State private var usePin = false
 
     var body: some View {
         VStack(spacing: 20) {
@@ -17,8 +20,9 @@ struct UnlockView: View {
             Image(systemName: "lock.fill").font(.system(size: 44)).foregroundStyle(.tint)
             Text("CleanPassword").font(.title2.bold())
             Text("\(info.settings.bucket)/\(info.settings.prefix)").font(.footnote).foregroundStyle(.secondary)
-            SecureField("Master password", text: $password)
-                .textContentType(.password)
+            SecureField(usePin ? "PIN" : "Master password", text: $password)
+                .textContentType(usePin ? .oneTimeCode : .password)
+                .keyboardType(usePin ? .numberPad : .default)
                 .padding(12)
                 .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
                 .focused($focused)
@@ -39,6 +43,14 @@ struct UnlockView: View {
                     Task { _ = await store.unlockWithBiometrics() }
                 } label: {
                     Label("Use \(BiometricKey.biometryName)", systemImage: "faceid")
+                }
+            }
+            if store.pinOn || usePin {
+                Button(usePin ? "Use Master Password" : "Use PIN") {
+                    usePin.toggle()
+                    password = ""
+                    error = nil
+                    focused = true
                 }
             }
             Spacer()
@@ -84,6 +96,13 @@ struct UnlockView: View {
         busy = true
         error = nil
         defer { busy = false }
+        if usePin {
+            error = await store.unlockWithPin(password)
+            password = ""
+            // Too many wrong PINs: back to the master password.
+            if error != nil && !store.pinOn { usePin = false }
+            return
+        }
         do {
             try await store.unlock(password: password)
             password = ""

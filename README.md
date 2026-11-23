@@ -65,6 +65,8 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 - **Verification codes, set up as in Apple's Passwords:** “Set Up Verification Code…” on a login (or the scan button in the editor) scans the site's QR code with the camera, or reads it from a screenshot. A code QR scanned with the Camera app, or an `otpauth://` link, opens CleanPassword to choose the login to put it on, or a new one.
 - The Chrome popup has the same tiles, under the logins for the current site.
 - **Face ID unlock.** It's optional, uses a keychain item readable only after biometric authentication, and is forgotten when the enrolled faces change.
+- **PIN unlock** (Settings → Set Up PIN Unlock), as Bitwarden offers: at least 6 digits, for this iPhone and its AutoFill only. The vault key is sealed with an Argon2id key from the PIN and kept in the keychain; five wrong PINs delete it, and the master password is needed again.
+- **Ask for Face ID to Show** on an item (Bitwarden's master password re-prompt): its screen, copy actions and code need Face ID or the passcode first, even while the vault is unlocked. It comes and goes with Bitwarden imports and exports.
 - **Auto-lock** after time in the background.
 - **The AutoFill extension** works from the keyboard, the QuickType suggestions, and Safari and apps, for passwords and **passkeys** (iOS 17’s passkey provider). It unlocks with Face ID or the master password.
   - **New passkeys:** “Save a passkey for …?” saves the passkey on the site’s login, or a new one, and syncs it at once (waiting at most a few seconds, so the site isn't kept waiting; the app finishes an unfinished sync). A passkey is handed to the site only once it's saved.

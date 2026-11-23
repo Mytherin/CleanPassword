@@ -79,6 +79,40 @@ final class VaultStore: ObservableObject {
         return true
     }
 
+    /// Unlocks with the PIN. Nil when unlocked, else what to tell the user
+    /// (a wrong PIN, how many tries are left, or that PIN unlock is off).
+    func unlockWithPin(_ pin: String) async -> String? {
+        guard let saved = SavedVault.load(), let id = vaultId else { return "There's no vault on this iPhone." }
+        let outcome = await Core.shared.detachedValue { PinKey.unlock(pin: pin, vaultId: id) }
+        guard case .key(let key) = outcome else {
+            objectWillChange.send()
+            return PinKey.explain(outcome)
+        }
+        do {
+            let s = try await Core.shared.detached { try VaultSession.unlockWithKey(saved: saved, key: key) }
+            await opened(s, from: saved)
+            return nil
+        } catch {
+            return message(error)
+        }
+    }
+
+    var pinOn: Bool {
+        vaultId.map { PinKey.exists(vaultId: $0) } ?? false
+    }
+
+    /// Turns PIN unlock on with this PIN, or off (nil).
+    func setPin(_ pin: String?) async throws {
+        guard let id = vaultId else { return }
+        if let pin {
+            let key = try await Core.shared.run { $0.key() }
+            try await Core.shared.detached { try PinKey.store(key: key, pin: pin, vaultId: id) }
+        } else {
+            PinKey.remove(vaultId: id)
+        }
+        objectWillChange.send()
+    }
+
     private func opened(_ s: VaultSession, from saved: String? = nil) async {
         await Core.shared.open(s, from: saved)
         try? await Core.shared.persist()
@@ -161,7 +195,10 @@ final class VaultStore: ObservableObject {
         editing = nil
         lockedDraft = nil
         reopenDraft = nil
-        if let id = vaultId { BiometricKey.remove(vaultId: id) }
+        if let id = vaultId {
+            BiometricKey.remove(vaultId: id)
+            PinKey.remove(vaultId: id)
+        }
         Core.shared.lock()
         SavedVault.remove()
         SuggestionStore.clear()

@@ -163,4 +163,14 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(try generateUsername(recipe: .word(capitalize: false, number: false)).isEmpty)
         XCTAssertThrowsError(try generateUsername(recipe: .plusAddress(email: "nope")))
     }
+
+    /// The vault key sealed with a PIN opens with that PIN only.
+    func testPinSealing() throws {
+        let s = try VaultSession.create(settings: settings, keys: keys, password: password)
+        let sealed = try sealKeyWithPin(key: s.key(), pin: "482915")
+        XCTAssertEqual(try openKeyWithPin(sealed: sealed, pin: "482915"), s.key())
+        XCTAssertThrowsError(try openKeyWithPin(sealed: sealed, pin: "000000")) { e in
+            XCTAssertEqual(e as? CoreError, .WrongPassword)
+        }
+    }
 }
