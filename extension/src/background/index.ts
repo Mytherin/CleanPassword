@@ -14,6 +14,7 @@
 import init, * as core from "../core/core.js";
 import type { Credentials, FillValues, FormKind, Item, ItemData, Match, MenuState, PasskeyChoice, PasskeyState, PromptState, Recipe, Role, S3Config, Settings, Submission, SyncReport } from "../shared/types";
 import { DEFAULT_SETTINGS } from "../shared/types";
+import { store } from "./store";
 
 const EXT_ORIGIN = new URL(chrome.runtime.getURL("")).origin;
 
@@ -27,6 +28,12 @@ function loadCore(): Promise<unknown> {
 
 let session: core.Session | null = null;
 let restoring: Promise<void> | null = null;
+/** When the master password was last entered (unlocking, or for a passkey):
+ *  a passkey sign-in soon after tells the site the user was verified. In
+ *  memory only, so a restarted worker asks again. */
+let verifiedAt = 0;
+const VERIFIED_FOR_MS = 2 * 60_000;
+const recentlyVerified = () => Date.now() - verifiedAt < VERIFIED_FOR_MS;
 
 /** Runs `f` after any running sync (the core refuses calls during one). */
 let queue: Promise<unknown> = Promise.resolve();
@@ -41,7 +48,7 @@ async function restore(): Promise<void> {
   if (session) return;
   restoring ??= (async () => {
     const { key } = await chrome.storage.session.get("key");
-    const { vault } = await chrome.storage.local.get("vault");
+    const { vault } = await store.get("vault");
     if (typeof key === "string" && typeof vault === "string") {
       try {
         session = core.Session.unlockWithKey(vault, key);
@@ -54,7 +61,7 @@ async function restore(): Promise<void> {
 }
 
 async function settings(): Promise<Settings> {
-  const { settings } = await chrome.storage.local.get("settings");
+  const { settings } = await store.get("settings");
   return { ...DEFAULT_SETTINGS, ...(settings ?? {}) };
 }
 
@@ -87,12 +94,13 @@ async function lock(): Promise<void> {
   await exclusive(async () => {
     if (session) {
       try {
-        await chrome.storage.local.set({ vault: session.save() });
+        await store.set({ vault: session.save() });
       } catch {}
       session.free();
       session = null;
     }
     await chrome.storage.session.remove("key");
+    verifiedAt = 0;
     chrome.alarms.clear("sync");
     chrome.alarms.clear("autolock");
     tabLogins.clear();
@@ -106,7 +114,7 @@ async function lock(): Promise<void> {
 }
 
 async function persist(): Promise<void> {
-  if (session) await chrome.storage.local.set({ vault: session.save() });
+  if (session) await store.set({ vault: session.save() });
 }
 
 /** Restarts the auto-lock timer. */
@@ -168,6 +176,9 @@ async function syncNow(): Promise<typeof lastSync> {
     } catch (e) {
       lastSync = { at: new Date().toISOString(), error: String((e as Error).message ?? e), report: null };
       await persist();
+      // Another device changed the master password (and the vault key):
+      // locked, the new password unlocks and moves this browser to it.
+      if ((e as Error).name === "PasswordChangedElsewhere") setTimeout(() => void lock(), 0);
     }
     return lastSync;
   });
@@ -361,6 +372,8 @@ interface PendingSave {
   username: string;
   password: string;
   at: number;
+  /** From a form of another site embedded in the page. */
+  embedded: boolean;
 }
 const pendingSaves = new Map<number, PendingSave>();
 /** How long a save is offered after the sign-in. */
@@ -426,8 +439,14 @@ async function submitted(frame: FrameRef, s: Submission): Promise<void> {
   }
   if (target && target.password === password) return;
   if (!target && items.some((i) => i.password === password && !username)) return;
+  // A form from another site embedded in the page (an ad, a widget) doesn't
+  // take the place of a save the page itself is offering.
+  const embedded = frame.frameId !== 0 && (await embeddingPage(frame)) !== null;
+  const waiting = pendingSave(frame.tabId);
+  if (embedded && waiting && !waiting.embedded) return;
 
   pendingSaves.set(frame.tabId, {
+    embedded,
     token: token(),
     kind: target ? "update" : "save",
     itemId: target?.id ?? null,
@@ -460,7 +479,7 @@ async function answerPrompt(p: PendingSave, tabId: number, answer: string): Prom
   if (answer === "never") {
     const s = await settings();
     s.neverSave.push(originOf(p.url));
-    await chrome.storage.local.set({ settings: s });
+    await store.set({ settings: s });
     return;
   }
   if (answer !== "save") return;
@@ -552,7 +571,7 @@ async function webauthn(frame: FrameRef, msg: Msg): Promise<PasskeyAnswer> {
   if (frame.frameId !== 0) return { fallback: true };
   const rpId = String((kind === "create" ? o.rp?.id : o.rpId) || hostOf(frame.url)).toLowerCase();
   if (!core.rpIdAllowed(rpId, frame.origin)) return { fallback: true };
-  if (!(await chrome.storage.local.get("vault")).vault) return { fallback: true };
+  if (!(await store.get("vault")).vault) return { fallback: true };
   await restore();
   const conditional = kind === "get" && msg.mediation === "conditional";
   if (kind === "create") {
@@ -578,16 +597,29 @@ async function webauthn(frame: FrameRef, msg: Msg): Promise<PasskeyAnswer> {
     const req: PasskeyRequest = { frame, pageId: Number(msg.id), kind, options: o, rpId, conditional, resolve };
     passkeyRequests.set(t, req);
     if (conditional) return; // answered from the inline menu
-    void chrome.windows
-      .create({ url: chrome.runtime.getURL("passkey.html#" + t), type: "popup", width: 420, height: 560, focused: true })
-      .then((w) => {
-        if (passkeyRequests.has(t)) req.windowId = w?.id;
-        else if (w?.id !== undefined) void chrome.windows?.remove(w.id).catch(() => {});
-      })
-      // No window, no way to answer: Chrome's own passkeys instead (and the
-      // tab isn't left blocked by a request no one can see).
-      .catch(() => finishPasskey(t, { fallback: true }));
+    openPasskeyWindow(t, req);
   });
+}
+
+function openPasskeyWindow(t: string, req: PasskeyRequest): void {
+  void chrome.windows
+    .create({ url: chrome.runtime.getURL("passkey.html#" + t), type: "popup", width: 420, height: 560, focused: true })
+    .then((w) => {
+      if (passkeyRequests.has(t)) req.windowId = w?.id;
+      else if (w?.id !== undefined) void chrome.windows?.remove(w.id).catch(() => {});
+    })
+    // No window, no way to answer: Chrome's own passkeys instead (and the
+    // tab isn't left blocked by a request no one can see).
+    .catch(() => finishPasskey(t, { fallback: true }));
+}
+
+/** The site requires user verification (the UV flag), and the master
+ *  password wasn't entered just now: it's asked for first. Without UV
+ *  required, a click in the unlocked vault signs in, and the site is told
+ *  the user was only present unless the password was entered just now. */
+function needsVerifying(r: PasskeyRequest): boolean {
+  const uv = r.kind === "get" ? r.options.userVerification : r.options.authenticatorSelection?.userVerification;
+  return uv === "required" && !recentlyVerified();
 }
 
 chrome.windows?.onRemoved.addListener((windowId) => {
@@ -612,6 +644,7 @@ function passkeyState(token: string): PasskeyState | null {
         ? (s.siteLogins("https://" + r.rpId) as Match[]).filter((m) => m.quality !== "related").map((m) => ({ id: m.id, name: m.name, username: m.username }))
         : [],
     excluded: !!s && r.kind === "create" && (s.passkeyExcluded(r.rpId, idsOf(o.excludeCredentials)) as boolean),
+    askPassword: !!s && needsVerifying(r),
   };
 }
 
@@ -619,7 +652,7 @@ async function passkeyAssertion(r: PasskeyRequest, itemId: string, credentialId:
   const s = session;
   if (!s) throw new Error("locked");
   const cdj = core.clientDataJson("webauthn.get", String(r.options.challenge), r.frame.origin, false);
-  const a = s.assertPasskey(itemId, credentialId, r.rpId, await sha256b64(cdj)) as Record<string, string>;
+  const a = s.assertPasskey(itemId, credentialId, r.rpId, await sha256b64(cdj), recentlyVerified()) as Record<string, string>;
   await persist();
   scheduleSync();
   return { id: a.credential_id, clientDataJSON: b64url(new TextEncoder().encode(cdj)), authenticatorData: a.authenticator_data, signature: a.signature, userHandle: a.user_handle };
@@ -646,6 +679,15 @@ async function passkeyAnswer(token: string, msg: Msg): Promise<{ error: string |
     finishPasskey(token, NOT_ALLOWED);
     return { error: "The page changed." };
   }
+  if (typeof msg.password === "string" && msg.password) {
+    try {
+      s.verifyMasterPassword(msg.password);
+    } catch {
+      return { error: "That's not the master password." };
+    }
+    verifiedAt = Date.now();
+  }
+  if (needsVerifying(r)) return { error: `${hostOf(r.frame.url)} asks you to confirm it's you: enter your master password.` };
   touch();
   if (msg.action === "use") {
     finishPasskey(token, { result: await passkeyAssertion(r, String(msg.itemId), String(msg.credentialId)) });
@@ -655,7 +697,7 @@ async function passkeyAnswer(token: string, msg: Msg): Promise<{ error: string |
     const o = r.options;
     const cdj = core.clientDataJson("webauthn.create", String(o.challenge), r.frame.origin, false);
     const reg = s.createPasskey(
-      { rp_id: r.rpId, rp_name: o.rp?.name ?? "", user_handle: o.user?.id ?? "", user_name: o.user?.name ?? "", user_display_name: o.user?.displayName ?? "" },
+      { rp_id: r.rpId, rp_name: o.rp?.name ?? "", user_handle: o.user?.id ?? "", user_name: o.user?.name ?? "", user_display_name: o.user?.displayName ?? "", user_verified: recentlyVerified() },
       (msg.itemId as string) || undefined,
     ) as Record<string, string>;
     await persist();
@@ -692,7 +734,7 @@ async function fromPage(msg: Msg, sender: chrome.runtime.MessageSender): Promise
       const kind = msg.kind as FormKind;
       // Nothing to offer: no menu (a locked vault still offers unlocking,
       // where there's a vault at all).
-      if (!session && !(await chrome.storage.local.get("vault")).vault) return null;
+      if (!session && !(await store.get("vault")).vault) return null;
       const passkeysWaiting = conditionalFor(frame) !== undefined;
       if (session && !passkeysWaiting && (role === "username" || role === "current-password") && kind !== "signup" && (session.matches(frame.url) as Match[]).length === 0) return null;
       if (session && role === "otp" && !tabLogin(frame.tabId, frame.url)) return null;
@@ -747,7 +789,10 @@ async function fromPage(msg: Msg, sender: chrome.runtime.MessageSender): Promise
         await fillGenerated(frame, groupId, msg.kind as FormKind, pw);
         return null;
       }
-      const matches = session.matches(frame.url) as Match[];
+      // Only a login saved for this very host (or the one used in this tab):
+      // the shortcut fills without showing which, and another host of the
+      // domain may be another site (a hosted page, a taken-over subdomain).
+      const matches = (session.matches(frame.url) as Match[]).filter((m) => m.quality === "host");
       const preferred = tabLogin(frame.tabId, frame.url);
       const pick = matches.find((m) => m.id === preferred) ?? matches[0];
       if (pick) await fillItem(frame, groupId, msg.kind as FormKind, pick.id);
@@ -791,7 +836,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
   switch (msg.type) {
     // -- Setup and locking
     case "state": {
-      const { vault } = await chrome.storage.local.get("vault");
+      const { vault } = await store.get("vault");
       const info = typeof vault === "string" ? core.lockedInfo(vault) : null;
       return { state: session ? "unlocked" : vault ? "locked" : "setup", info, lastSync, unsynced: session?.hasUnsyncedChanges() ?? false };
     }
@@ -812,8 +857,9 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
       return { ok: true };
     }
     case "unlock": {
-      const { vault } = await chrome.storage.local.get("vault");
+      const { vault } = await store.get("vault");
       const s = core.Session.unlock(String(vault), String(msg.password));
+      verifiedAt = Date.now();
       await becameUnlocked(s);
       return { ok: true };
     }
@@ -823,14 +869,14 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "forget": {
       // Removes the vault from this browser (not from S3).
       await lock();
-      await chrome.storage.local.remove("vault");
+      await store.remove("vault");
       return { ok: true };
     }
     case "settings":
       return settings();
     case "set-settings": {
       const s = { ...(await settings()), ...(msg.settings as Partial<Settings>) };
-      await chrome.storage.local.set({ settings: s });
+      await store.set({ settings: s });
       if ("replaceChrome" in (msg.settings as object)) await applyReplaceChrome();
       touch();
       return s;
@@ -893,9 +939,15 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "import-needs-password":
       return core.importNeedsPassword(String(msg.text));
     case "export":
-      return s.exportJson();
-    case "change-password":
-      return changed(s.changeMasterPassword(String(msg.current), String(msg.password)));
+      // Not with an unlocked vault alone: the master password again.
+      return s.exportJson(String(msg.password ?? ""));
+    case "change-password": {
+      s.changeMasterPassword(String(msg.current), String(msg.password));
+      verifiedAt = Date.now();
+      // A new vault key comes with it: the session's copy is replaced.
+      await chrome.storage.session.set({ key: s.keyB64() });
+      return changed(undefined);
+    }
     case "set-credentials":
       return changed(s.setCredentials(msg.credentials as Credentials));
     case "account":
@@ -961,6 +1013,13 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
         finishPasskey(t, NOT_ALLOWED);
         return { error: "The page changed." };
       }
+      if (needsVerifying(req)) {
+        // The site requires the user verified: the passkey window asks for
+        // the master password (the menu can't).
+        req.conditional = false;
+        openPasskeyWindow(t, req);
+        return { error: null };
+      }
       finishPasskey(t, { result: await passkeyAssertion(req, String(msg.itemId), String(msg.credentialId)) });
       touch();
       return { error: null };
@@ -981,7 +1040,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
       if (!m) return null;
       const st = await settings();
       st.menuOff.push(m.frame.origin);
-      await chrome.storage.local.set({ settings: st });
+      await store.set({ settings: st });
       return null;
     }
 

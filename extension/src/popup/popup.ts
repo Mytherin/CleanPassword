@@ -10,7 +10,7 @@ if (new URLSearchParams(location.search).has("window")) document.body.classList.
 
 interface State {
   state: "setup" | "locked" | "unlocked";
-  info: { config: S3Config; vault_id: string; last_sync: string | null } | null;
+  info: { config: S3Config; vault_id: string; last_sync: string | null; password_changed_elsewhere?: boolean } | null;
   lastSync: { at: string; error: string | null; report: SyncReport | null };
   unsynced: boolean;
 }
@@ -210,6 +210,7 @@ function unlock(s: State): void {
   const form = h("form", { class: "form", style: "margin-top: 40px" },
     h("div", { style: "text-align:center; font-size:36px" }, "🔒"),
     h("p", { class: "muted", style: "text-align:center" }, s.info ? `${s.info.config.bucket}/${s.info.config.prefix}` : ""),
+    s.info?.password_changed_elsewhere ? h("p", { class: "warn", style: "text-align:center" }, "The master password was changed on another device: unlock with the new one.") : "",
     pw, err,
     h("div", { style: "display:flex; justify-content:center" }, go),
     progress.el,
@@ -676,7 +677,7 @@ async function settingsView(): Promise<void> {
     h("div", { class: "section" }, "Data"),
     h("div", { class: "card" },
       h("button", { class: "row", onclick: () => importView() }, h("span", { class: "text" }, h("div", { class: "title" }, "Import"), h("div", { class: "sub" }, "From Bitwarden (JSON or CSV), Chrome, Safari, Firefox, 1Password, LastPass"))),
-      h("button", { class: "row", onclick: () => void exportVault() }, h("span", { class: "text" }, h("div", { class: "title" }, "Export"), h("div", { class: "sub" }, "As unencrypted Bitwarden JSON"))),
+      h("button", { class: "row", onclick: () => exportVault() }, h("span", { class: "text" }, h("div", { class: "title" }, "Export"), h("div", { class: "sub" }, "As unencrypted Bitwarden JSON"))),
     ),
     h("div", { class: "actions", style: "margin-top: 12px" }, h("button", { class: "btn danger", onclick: () => void forget() }, "Remove vault from this browser")),
   );
@@ -842,13 +843,30 @@ function importView(): void {
   screen("Import", back(() => void settingsView()), [], form);
 }
 
-async function exportVault(): Promise<void> {
-  if (!confirm("The export holds every password unencrypted. Keep it safe and delete it when you're done. Export?")) return;
-  const json = await ask<string>("export");
-  const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
-  const a = h("a", { href: url, download: `cleanpassword-export-${new Date().toISOString().slice(0, 10)}.json` });
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+/** Every item, unencrypted: only with the master password again (an
+ *  unlocked browser alone isn't enough). */
+function exportVault(): void {
+  const pw = input({ type: "password", autocomplete: "current-password" });
+  const err = errorBox();
+  const go = h("button", { class: "btn primary", type: "submit" }, "Export");
+  const form = h("form", { class: "form" },
+    h("p", { class: "warn" }, "The export holds every password unencrypted. Keep it safe, and delete it when you're done."),
+    h("label", {}, "Master password", pw), err,
+    h("div", { style: "display:flex; justify-content:flex-end" }, go));
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void run(err, async () => {
+      const json = await ask<string>("export", { password: pw.value });
+      pw.value = "";
+      const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+      const a = h("a", { href: url, download: `cleanpassword-export-${new Date().toISOString().slice(0, 10)}.json` });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      await settingsView();
+    }, go);
+  });
+  screen("Export", back(() => void settingsView()), [], form);
+  setTimeout(() => pw.focus(), 0);
 }
 
 start().catch((e: Error) => {

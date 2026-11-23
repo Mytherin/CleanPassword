@@ -348,6 +348,11 @@ try {
   check("asks in a window of its own to save a passkey", !!saveWin);
   if (saveWin) {
     await saveWin.waitForSelector(".btn.primary");
+    // The site requires user verification, and the vault was unlocked a
+    // while ago: the master password first.
+    const verify = await saveWin.$('input[type=password]');
+    check("asks for the master password when the site requires verification", !!verify);
+    if (verify) await verify.type("correct horse battery staple");
     await sleep(500);
     await saveWin.click(".btn.primary");
   }
@@ -434,6 +439,13 @@ try {
   check("refuses a wrong master password", unlocked.ok === false && unlocked.name === "WrongPassword", JSON.stringify(unlocked));
   await ask("unlock", { password: "correct horse battery staple" });
   check("unlocks with the right one", (await ask("state")).state === "unlocked");
+  const raw = (m) => popup.evaluate((m) => chrome.runtime.sendMessage(m), m);
+  const noPw = await raw({ type: "export" });
+  check("exporting needs the master password", noPw.ok === false && noPw.name === "WrongPassword", JSON.stringify(noPw));
+  const exported = await raw({ type: "export", password: "correct horse battery staple" });
+  check("and exports with it", exported.ok && exported.value.includes("s3cret-Passw0rd"));
+  const inStorageLocal = await popup.evaluate(() => chrome.storage.local.get(null));
+  check("keeps the vault where content scripts can't reach it", !("vault" in inStorageLocal) && !("settings" in inStorageLocal), Object.keys(inStorageLocal).join());
 
   // The menu works, and stays, on pages with a modal dialog or a popover of
   // their own, and for fields in a closed shadow root.

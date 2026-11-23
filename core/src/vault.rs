@@ -286,6 +286,9 @@ pub struct LockedInfo {
     pub config: S3Config,
     pub vault_id: String,
     pub last_sync: Option<DateTime<Utc>>,
+    /// Another device changed the master password: the new one unlocks.
+    #[serde(default)]
+    pub password_changed_elsewhere: bool,
 }
 
 /// An item matching a web page.
@@ -867,7 +870,7 @@ fn parse_saved(saved: &str) -> Result<Saved> {
 /// The S3 settings of a saved vault, without unlocking it.
 pub fn locked_info(saved: &str) -> Result<LockedInfo> {
     let s = parse_saved(saved)?;
-    Ok(LockedInfo { config: s.config, vault_id: s.header.vault_id, last_sync: s.last_sync })
+    Ok(LockedInfo { config: s.config, vault_id: s.header.vault_id, last_sync: s.last_sync, password_changed_elsewhere: s.pending.is_some() })
 }
 
 #[cfg(test)]

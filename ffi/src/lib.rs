@@ -274,6 +274,8 @@ pub struct LockedVault {
     pub settings: S3Settings,
     pub vault_id: String,
     pub last_sync: Option<i64>,
+    /// Another device changed the master password: the new one unlocks.
+    pub password_changed_elsewhere: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Enum)]
@@ -695,7 +697,7 @@ pub fn fetch_remote_vault(settings: S3Settings, keys: AwsKeys) -> R<Option<Remot
 /// What can be shown of a saved vault without unlocking it.
 #[uniffi::export]
 pub fn locked_vault(saved: String) -> Option<LockedVault> {
-    vault::locked_info(&saved).ok().map(|i| LockedVault { settings: (&i.config).into(), vault_id: i.vault_id, last_sync: i.last_sync.map(secs) })
+    vault::locked_info(&saved).ok().map(|i| LockedVault { settings: (&i.config).into(), vault_id: i.vault_id, last_sync: i.last_sync.map(secs), password_changed_elsewhere: i.password_changed_elsewhere })
 }
 
 

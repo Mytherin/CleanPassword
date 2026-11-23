@@ -2,18 +2,21 @@
 // sign-in. An extension page in an iframe, like the inline menu.
 
 import type { PromptState } from "../shared/types";
+import { safeToAct } from "../shared/clicksafe";
 import { ask, h, monogram } from "../shared/ui";
 
 const token = location.hash.slice(1);
 const root = document.getElementById("root")!;
-const shownAt = performance.now();
 
 function close(): void {
   parent.postMessage({ type: "close" }, "*");
 }
 
 function answer(e: Event, a: string): void {
-  if (!e.isTrusted || performance.now() - shownAt < 500) return;
+  // As the inline menu: only a click on the prompt fully visible for a
+  // moment (a page could otherwise trick the user into saving a password it
+  // chose over the one saved).
+  if (!safeToAct(e)) return;
   void ask("prompt-answer", { token, answer: a }).finally(close);
 }
 

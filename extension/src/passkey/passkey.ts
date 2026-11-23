@@ -40,6 +40,13 @@ async function draw(): Promise<void> {
     s.kind === "get" ? `Sign in to ${s.host} with a passkey?` : s.excluded ? `A passkey for ${s.userName || "this account"} is already saved` : `Save a passkey for ${s.userName || "your account"} on ${s.rpId}?`;
   const head = h("div", { class: "head" }, monogram(site), h("h1", {}, title));
   const body: Node[] = [];
+  // The site requires the user verified: the master password with the answer.
+  const verify = h("input", { type: "password", placeholder: "Master password", autocomplete: "current-password" }) as HTMLInputElement;
+  const withPassword = (extra: Record<string, unknown>) => (s.askPassword ? { ...extra, password: verify.value } : extra);
+  if (s.askPassword && !s.locked && !s.excluded) {
+    body.push(h("p", { class: "muted", style: "margin:0; text-align:center" }, `${s.host} asks you to confirm it's you.`), verify);
+    setTimeout(() => verify.focus(), 0);
+  }
 
   if (s.locked) {
     const pw = h("input", { type: "password", placeholder: "Master password", autocomplete: "current-password" });
@@ -61,7 +68,7 @@ async function draw(): Promise<void> {
     if (!s.choices.length) body.push(h("p", { class: "muted" }, `CleanPassword has no passkey for ${s.rpId}.`));
     else {
       body.push(h("div", { class: "list" }, ...s.choices.map((c) =>
-        h("button", { class: "row", onclick: (e: Event) => void answer(e, "use", { itemId: c.item_id, credentialId: c.credential_id }) },
+        h("button", { class: "row", onclick: (e: Event) => void answer(e, "use", withPassword({ itemId: c.item_id, credentialId: c.credential_id })) },
           h("span", { class: "mono", style: "background:var(--accent)" }, "🔑"),
           h("span", { class: "text" }, h("div", { class: "title" }, c.user_name || c.user_display_name || c.item_name), h("div", { class: "sub" }, c.item_name))))));
     }
@@ -74,7 +81,7 @@ async function draw(): Promise<void> {
     if (same) target.value = same.id;
     body.push(h("p", { class: "muted", style: "margin:0; text-align:center" }, "A passkey lets you sign in without a password. It's kept in CleanPassword, encrypted, on all your devices."));
     if (s.logins.length) body.push(h("label", {}, "Save on", target));
-    body.push(h("button", { class: "btn primary", onclick: (e: Event) => void answer(e, "create", { itemId: target.value }) }, "Save Passkey"));
+    body.push(h("button", { class: "btn primary", onclick: (e: Event) => void answer(e, "create", withPassword({ itemId: target.value })) }, "Save Passkey"));
   }
   root.replaceChildren(head, ...(body.filter(Boolean) as Node[]), s.excluded ? h("div", {}) : otherWays());
 }

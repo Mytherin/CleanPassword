@@ -6,6 +6,7 @@
 // second (IntersectionObserver v2), so a page can't trick a click onto it.
 
 import type { Match, MenuState } from "../shared/types";
+import { safeToAct } from "../shared/clicksafe";
 import { ask, h, monogram } from "../shared/ui";
 
 const token = location.hash.slice(1);
@@ -35,31 +36,7 @@ filter.addEventListener("input", () => {
 
 // ---- Click safety -------------------------------------------------------------------
 
-let visibleSince = 0;
-let ioSupported = false;
-try {
-  const io = new IntersectionObserver(
-    (entries) => {
-      for (const e of entries) {
-        const vis = (e as IntersectionObserverEntry & { isVisible?: boolean }).isVisible;
-        if (vis === undefined) continue;
-        ioSupported = true;
-        visibleSince = vis ? visibleSince || performance.now() : 0;
-      }
-    },
-    { threshold: [1], trackVisibility: true, delay: 100 } as IntersectionObserverInit,
-  );
-  io.observe(document.body);
-} catch {}
-const shownAt = performance.now();
-
-function safeToAct(e: Event): boolean {
-  if (!e.isTrusted) return false;
-  const now = performance.now();
-  if (now - shownAt < 500) return false;
-  if (ioSupported && (!visibleSince || now - visibleSince < 500)) return false;
-  return true;
-}
+// See shared/clicksafe.ts.
 
 // ---- Rendering -----------------------------------------------------------------------
 
@@ -105,7 +82,9 @@ function matchRow(m: Match): HTMLButtonElement {
         ? "Fill one-time code"
         : m.quality === "related"
           ? `${m.username || "No user name"} · shared sign-in`
-          : m.username || "No user name";
+          : m.quality === "domain"
+            ? `${m.username || "No user name"} · saved for another part of the site`
+            : m.username || "No user name";
   return row(monogram(m.name), m.name, sub, (e) => {
     if (state!.embeddedIn && confirming !== m.id) {
       if (!safeToAct(e)) return;

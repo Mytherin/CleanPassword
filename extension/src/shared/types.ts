@@ -168,6 +168,8 @@ export interface PasskeyState {
   logins: { id: string; name: string; username: string }[];
   /** The site already has a passkey of this account in the vault. */
   excluded: boolean;
+  /** The site requires the user verified: the master password first. */
+  askPassword: boolean;
 }
 
 export interface PromptState {
