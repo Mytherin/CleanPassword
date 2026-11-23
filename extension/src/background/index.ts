@@ -81,6 +81,9 @@ async function becameUnlocked(s: core.Session): Promise<void> {
 }
 
 async function lock(): Promise<void> {
+  // A restore under way (the worker just woke, for the autolock alarm too)
+  // would otherwise put the session back right after it's locked.
+  await restoring;
   await exclusive(async () => {
     if (session) {
       try {
@@ -779,7 +782,10 @@ async function openPopup(): Promise<void> {
 /** Messages from the extension's own pages. */
 async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Promise<unknown> {
   await restore();
-  if (session) touch();
+  // Only what the user does keeps the vault unlocked: the inline menu, save
+  // prompt and passkey window ask for their state as they load, which a
+  // page can make happen (by focusing a field) as often as it likes.
+  if (session && !["menu-state", "prompt-state", "passkey-state"].includes(msg.type)) touch();
   switch (msg.type) {
     // -- Setup and locking
     case "state": {

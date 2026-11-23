@@ -400,7 +400,11 @@ async function detail(id: string): Promise<void> {
   if (main.length) cards.push(h("div", { class: "card" }, ...main));
   if (i.uris.length) {
     cards.push(h("div", { class: "card" }, ...i.uris.map((u) =>
-      field("Website", u.uri, h("button", { class: "btn small", onclick: () => chrome.tabs.create({ url: u.uri.includes("://") ? u.uri : `https://${u.uri}` }) }, "Open")))));
+      // Only websites open: an imported or synced item's "website" could be
+      // a data:, file: or other URL.
+      /^https?:\/\//i.test(u.uri) || !u.uri.includes("://")
+        ? field("Website", u.uri, h("button", { class: "btn small", onclick: () => chrome.tabs.create({ url: u.uri.includes("://") ? u.uri : `https://${u.uri}` }) }, "Open"))
+        : field("Website", u.uri))));
   }
   if (i.passkeys?.length) {
     cards.push(h("div", { class: "card" }, ...i.passkeys.map((p) =>
