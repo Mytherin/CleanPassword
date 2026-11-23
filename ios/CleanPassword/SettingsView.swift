@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(Clipboard.copyCodeKey, store: Clipboard.defaults) private var copyCode = true
     @AppStorage(Clipboard.clearKey, store: Clipboard.defaults) private var clearAfter = 90
     @AppStorage(Breaches.settingKey) private var detectCompromised = true
+    @AppStorage(TwoFactorDirectory.settingKey) private var checkTwoFactor = true
     @State private var importing = false
     @State private var importText: String?
     @State private var importPassword = ""
@@ -61,10 +62,11 @@ struct SettingsView: View {
                     NavigationLink("Set Up PIN Unlock") { PinSetupView() }
                 }
                 Toggle("Detect Compromised Passwords", isOn: $detectCompromised)
+                Toggle("Find Sites That Offer Two-Factor", isOn: $checkTwoFactor)
             } header: {
                 Text("Security")
             } footer: {
-                Text("Compromised passwords are found by checking the start of each password's hash (never the password) against Have I Been Pwned's list of leaked passwords.")
+                Text("Compromised passwords are found by checking the start of each password's hash (never the password) against Have I Been Pwned's list of leaked passwords. Sites that offer verification codes come from 2fa.directory's public list, downloaded whole.")
             }
             Section {
                 Button("Turn On AutoFill…") {

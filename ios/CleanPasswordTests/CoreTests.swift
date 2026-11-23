@@ -173,4 +173,14 @@ final class CoreTests: XCTestCase {
             XCTAssertEqual(e as? CoreError, .WrongPassword)
         }
     }
+
+    /// 2fa.directory's list: sites by registrable domain, with their
+    /// instructions.
+    func testTwoFactorDirectory() {
+        let json = #"[["GitHub",{"domain":"github.com","tfa":["totp"],"documentation":"https://docs.github.com/2fa","additional-domains":["gist.github.com"]}],["Bad",{"tfa":["totp"]}]]"#
+        let sites = TwoFactorDirectory.parse(Data(json.utf8))
+        XCTAssertEqual(sites.count, 1)
+        XCTAssertEqual(sites["github.com"]??.absoluteString, "https://docs.github.com/2fa")
+        XCTAssertTrue(TwoFactorDirectory.parse(Data("nope".utf8)).isEmpty)
+    }
 }

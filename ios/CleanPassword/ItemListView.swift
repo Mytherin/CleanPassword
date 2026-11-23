@@ -199,7 +199,7 @@ private struct SecurityList: View {
         let weak = store.findings.filter { $0.reused == 0 && $0.weak && !isHidden($0.id) }
         let compromised = SortOrder.title.sorted(store.items.filter { (leaked[$0.id] ?? 0) > 0 && !isHidden($0.id) })
         let hiddenItems = SortOrder.title.sorted(store.items.filter { i in
-            HiddenRecommendations.isHidden(i, in: hidden) && ((leaked[i.id] ?? 0) > 0 || store.findings.contains { $0.id == i.id })
+            HiddenRecommendations.isHidden(i, in: hidden) && hasRecommendation(i)
         })
         List {
             if detect && (!compromised.isEmpty || checking || checkError != nil) {
@@ -256,6 +256,8 @@ private struct SecurityList: View {
                     Text("Change these to strong passwords: edit the item and tap the dice.")
                 }
             }
+            insecureSection
+            twoFactorSection
             if !hiddenItems.isEmpty {
                 Section {
                     DisclosureGroup("Hidden (\(hiddenItems.count))") {
@@ -272,7 +274,8 @@ private struct SecurityList: View {
             }
         }
         .overlay {
-            if reused.isEmpty && weak.isEmpty && hiddenItems.isEmpty && store.duplicates == 0 && compromised.isEmpty && !checking && checkError == nil {
+            if reused.isEmpty && weak.isEmpty && hiddenItems.isEmpty && store.duplicates == 0 && compromised.isEmpty && !checking && checkError == nil
+                && insecure.isEmpty && withoutTwoFactor.isEmpty {
                 ContentUnavailableView(
                     "No Security Recommendations", systemImage: "checkmark.shield",
                     description: Text(detect ? "No compromised, weak or reused passwords." : "No weak or reused passwords."))
@@ -280,6 +283,88 @@ private struct SecurityList: View {
         }
         .refreshable { await check() }
         .task(id: store.items.map(\.fields.password).hashValue) { await check() }
+        .task(id: checkTwoFactor) {
+            twoFactorSites = checkTwoFactor ? ((try? await TwoFactorDirectory.shared.load()) ?? [:]) : [:]
+        }
+    }
+
+    // MARK: Insecure websites and two-factor authentication
+
+    @AppStorage(TwoFactorDirectory.settingKey) private var checkTwoFactor = true
+    /// Sites that offer verification codes (registrable domain → how).
+    @State private var twoFactorSites: [String: URL?] = [:]
+
+    private func hasRecommendation(_ i: VaultItem) -> Bool {
+        (leaked[i.id] ?? 0) > 0 || store.findings.contains { $0.id == i.id } || isInsecure(i) || twoFactorDomain(i) != nil
+    }
+
+    /// A login saved for an http:// address: its password is sent
+    /// unencrypted there.
+    private func isInsecure(_ i: VaultItem) -> Bool {
+        i.fields.kind == .login && !i.fields.password.isEmpty && i.fields.websites.contains { $0.uri.lowercased().hasPrefix("http://") }
+    }
+
+    /// The domain of a login's site that offers verification codes, when
+    /// the login has none (nor a passkey).
+    private func twoFactorDomain(_ i: VaultItem) -> String? {
+        guard !twoFactorSites.isEmpty, i.fields.kind == .login, i.fields.totp.isEmpty, i.passkeys.isEmpty, !i.fields.password.isEmpty else { return nil }
+        return i.fields.websites.lazy.compactMap { ItemEditView.host($0.uri) }.map { registrableDomain(host: $0) }.first { twoFactorSites[$0] != nil }
+    }
+
+    private var insecure: [VaultItem] {
+        SortOrder.title.sorted(store.items.filter { isInsecure($0) && !isHidden($0.id) })
+    }
+
+    private var withoutTwoFactor: [VaultItem] {
+        SortOrder.title.sorted(store.items.filter { twoFactorDomain($0) != nil && !isHidden($0.id) })
+    }
+
+    @ViewBuilder
+    private var insecureSection: some View {
+        let items = insecure
+        if !items.isEmpty {
+            Section {
+                ForEach(items) { i in itemRow(i, "Saved for an http:// address", color: .orange) }
+            } header: {
+                Text("Insecure Websites")
+            } footer: {
+                Text("These sites receive your password unencrypted. Change the address to https:// if the site supports it.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var twoFactorSection: some View {
+        let items = withoutTwoFactor
+        if !items.isEmpty {
+            Section {
+                ForEach(items) { i in
+                    itemRow(i, "Offers verification codes", color: .blue)
+                        .contextMenu {
+                            if let domain = twoFactorDomain(i), let docs = twoFactorSites[domain] ?? nil {
+                                Link(destination: docs) { Label("How to Turn It On", systemImage: "safari") }
+                            }
+                        }
+                }
+            } header: {
+                Text("Two-Factor Authentication Available")
+            } footer: {
+                Text("These sites can ask for a verification code as well as your password. Turn it on at the site, then open the password and tap Set Up Verification Code. (From 2fa.directory's list.)")
+            }
+        }
+    }
+
+    private func itemRow(_ i: VaultItem, _ why: String, color: Color) -> some View {
+        NavigationLink(value: Route.item(id: i.id)) {
+            HStack(spacing: 12) {
+                SiteIcon(name: i.fields.name, host: i.host)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(i.fields.name)
+                    Text(why).font(.subheadline).foregroundStyle(color)
+                }
+            }
+        }
+        .swipeActions { hideButton(i.id) }
     }
 
     /// Looks up each login's password (by hash prefix only).
