@@ -23,7 +23,11 @@ enum SuggestionStore {
     static func update(with items: [VaultItem]) {
         var identities: [any ASCredentialIdentity] = []
         for item in items where item.fields.kind == .login {
-            let hosts = item.fields.websites.filter { $0.matching != .never }.compactMap { site in
+            // Only rules a host can stand for: iOS offers a suggestion for the
+            // site's domain and hands over just that, so a login kept to one
+            // exact address (or start, or pattern) would be offered beyond it.
+            // Those stay in the extension's list, matched against the page.
+            let hosts = item.fields.websites.filter { [Matching.default, .domain, .host].contains($0.matching) }.compactMap { site in
                 URL(string: site.uri.contains("://") ? site.uri : "https://\(site.uri)")?.host
             }
             if !item.fields.password.isEmpty {

@@ -29,7 +29,6 @@ struct GeneratorView: View {
                     .font(.title3.monospaced())
                     .frame(maxWidth: .infinity, alignment: .center)
                     .multilineTextAlignment(.center)
-                    .textSelection(.enabled)
                     .padding(.vertical, 8)
                 HStack {
                     Button("Regenerate") { generate() }

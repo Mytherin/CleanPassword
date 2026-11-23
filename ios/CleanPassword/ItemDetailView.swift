@@ -249,7 +249,7 @@ struct ItemDetailView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label).font(.caption).foregroundStyle(.secondary)
-                Text(value).font(mono ? .body.monospaced() : .body).textSelection(.enabled)
+                Text(value).font(mono ? .body.monospaced() : .body)
             }
             Spacer()
             copyButton(copy ?? value, key: key)
