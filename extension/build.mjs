@@ -11,7 +11,7 @@
 //   node build.mjs --watch   # rebuild the TypeScript on change (not the core)
 
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
@@ -67,4 +67,22 @@ cpSync(join(coreOut, "core_bg.wasm"), join(dist, "core.wasm"));
 if (!existsSync(join(dist, "icons"))) {
   run("node", [join(here, "tools", "icons.mjs"), join(dist, "icons")], here);
 }
-console.log(`Built ${dist}`);
+
+// 4. The same for Safari: the iPhone app's Safari extension
+//    (ios/CleanPasswordSafari) copies extension/dist-safari. Without what
+//    Safari on iOS lacks (keyboard shortcuts, context menus, the idle and
+//    privacy APIs) or leaves to the system (passkeys go through the app's
+//    AutoFill extension there).
+const safari = join(here, "dist-safari");
+rmSync(safari, { recursive: true, force: true });
+cpSync(dist, safari, { recursive: true, filter: (src) => !/webauthn-(page|bridge)\.js$/.test(src) });
+const manifest = JSON.parse(readFileSync(join(dist, "manifest.json"), "utf8"));
+delete manifest.minimum_chrome_version;
+delete manifest.commands;
+manifest.permissions = manifest.permissions.filter((p) => !["idle", "privacy", "contextMenus"].includes(p));
+manifest.content_scripts = manifest.content_scripts.filter((c) => !c.js.some((j) => j.startsWith("webauthn")));
+for (const c of manifest.content_scripts) delete c.match_origin_as_fallback;
+// Safari runs MV3 background scripts as a non-persistent page.
+manifest.background = { scripts: ["background.js"], type: "module" };
+writeFileSync(join(safari, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+console.log(`Built ${dist} and ${safari}`);

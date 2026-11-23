@@ -90,6 +90,14 @@ struct SettingsView: View {
                 Text("In Settings → General → AutoFill & Passwords, turn on CleanPassword. Suggestions show user names and websites (never passwords) to iOS so it can offer them above the keyboard. Filling a login with a verification code copies its code, ready for the site's next step.")
             }
             Section {
+                Label("Turn on CleanPassword in Settings → Apps → Safari → Extensions, and allow it on all websites.", systemImage: "safari")
+                    .font(.footnote)
+            } header: {
+                Text("Safari Extension")
+            } footer: {
+                Text("In Safari, CleanPassword can also offer to save a login after you sign up or sign in, and fill cards and identities, from the puzzle-piece menu. It keeps its own copy of the vault: set it up there with the same S3 folder and master password.")
+            }
+            Section {
                 Toggle("Show Website Icons", isOn: $siteIcons)
                     .onChange(of: siteIcons) { _, on in if !on { SiteIcons.clear() } }
             } footer: {

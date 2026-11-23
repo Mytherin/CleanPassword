@@ -42,6 +42,9 @@ targets:
       - target: CleanPasswordAutoFill
         embed: true
         codeSign: true
+      - target: CleanPasswordSafari
+        embed: true
+        codeSign: true
       - framework: build/CleanPasswordCore.xcframework
         embed: false
         link: true
@@ -123,6 +126,43 @@ targets:
         PRODUCT_NAME: CleanPasswordAutoFill
         TARGETED_DEVICE_FAMILY: "1,2"
         APPLICATION_EXTENSION_API_ONLY: YES
+  # The Safari extension: CleanPassword's browser extension in Safari, built
+  # by extension/build.mjs into extension/dist-safari first:
+  #   cd extension && npm ci && npm run build
+  CleanPasswordSafari:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: CleanPasswordSafari
+    info:
+      path: CleanPasswordSafari/Info.plist
+      properties:
+        CFBundleDisplayName: CleanPassword
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.web-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SafariWebExtensionHandler
+    dependencies:
+      - sdk: SafariServices.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cleanpassword.app.Safari
+        PRODUCT_NAME: CleanPasswordSafari
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
+    # The web extension's files go at the root of the bundle's resources,
+    # where Safari looks for manifest.json.
+    postBuildScripts:
+      - name: Copy the web extension
+        basedOnDependencyAnalysis: false
+        script: |
+          SRC="$PROJECT_DIR/../extension/dist-safari"
+          if [ ! -f "$SRC/manifest.json" ]; then
+            echo "error: build the browser extension first: cd extension && npm ci && npm run build"
+            exit 1
+          fi
+          cp -R "$SRC/." "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/"
   # Tests of the bindings and the app's model, in the iOS Simulator:
   #   xcodebuild test -project CleanPassword.xcodeproj -scheme CleanPassword \
   #     -destination 'platform=iOS Simulator,name=iPhone 16'
