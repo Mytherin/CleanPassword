@@ -91,9 +91,13 @@ fn seal_vault(key: &[u8; 32], vault_id: &str, items: &BTreeMap<String, Item>, se
     out
 }
 
-fn open_vault(key: &[u8; 32], vault_id: &str, data: &[u8]) -> Result<(BTreeMap<String, Item>, Option<u64>)> {
+/// Opens `vault.bin` with the vault key, or one before it (a device that
+/// changed the master password seals it again with the new key just after
+/// uploading vault.json, so another device can find it sealed with either).
+fn open_vault(keys: &[crypto::Key], vault_id: &str, data: &[u8]) -> Result<(BTreeMap<String, Item>, Option<u64>)> {
     let unreadable = || Error::invalid("the vault in S3 (vault.bin) can't be decrypted: it's damaged, or was written with another key");
-    let plain = crypto::open(key, &vault_aad(vault_id), data.strip_prefix(MAGIC).ok_or_else(unreadable)?).ok_or_else(unreadable)?;
+    let sealed = data.strip_prefix(MAGIC).ok_or_else(unreadable)?;
+    let plain = keys.iter().find_map(|k| crypto::open(k, &vault_aad(vault_id), sealed)).ok_or_else(unreadable)?;
     let stored: Stored = serde_json::from_slice(&plain).map_err(|_| unreadable())?;
     Ok((stored.items.into_iter().map(|i| (i.id.clone(), i)).collect(), stored.seq))
 }
@@ -175,6 +179,13 @@ impl Vault {
         Ok(report)
     }
 
+    /// The vault key, then the ones before it.
+    fn keys(&self) -> Vec<crypto::Key> {
+        let mut keys = vec![self.key.clone()];
+        keys.extend(self.header.previous(&self.key));
+        keys
+    }
+
     async fn sync_header<T: Transport>(&mut self, client: &Client<'_, T>, report: &mut SyncReport) -> Result<()> {
         let remote = client.get(HEADER_OBJECT).await?;
         match remote {
@@ -199,26 +210,38 @@ impl Vault {
                 if header.vault_id != self.header.vault_id {
                     return Err(Error::DifferentVault);
                 }
+                if header.wrapped_key == self.header.wrapped_key {
+                    self.pending = None;
+                }
                 if self.s.header_etag.as_deref() != Some(obj.etag.as_str()) {
                     if header.wrapped_key != self.header.wrapped_key {
                         // A new master password, set on another device (it
-                        // wins over one set here at the same time), if that
-                        // device holds the vault key and it isn't an older
-                        // header put back. Anything else is refused and left
-                        // alone: adopting it would lock every device out.
-                        if !header.signed_by(&self.key) {
-                            return Err(Error::invalid(
-                                "vault.json in S3 was replaced by someone without the vault key, so it was ignored (if you changed the master password with an older version of CleanPassword, update it there)",
-                            ));
-                        }
+                        // wins over one set here at the same time). Adopted
+                        // only if it's signed with the vault key and isn't an
+                        // older header put back: anything else could lock
+                        // every device out.
                         if header.generation < self.header.generation {
                             return Err(Error::invalid(
                                 "vault.json in S3 was put back to an older master password, so it was ignored (change the master password again to replace it)",
                             ));
                         }
-                        self.header = header;
-                        self.s.header_dirty = false;
-                        report.password_changed_elsewhere = true;
+                        if header.signed_by(&self.key) {
+                            self.header = header;
+                            self.s.header_dirty = false;
+                            report.password_changed_elsewhere = true;
+                        } else if header.generation > self.header.generation && !header.previous_keys.is_empty() {
+                            // A new vault key with it, which only the new
+                            // password opens: kept for unlocking with it
+                            // ([`Vault::unlock`]), which proves it genuine. A
+                            // forgery never unlocks, and the old password
+                            // still does.
+                            self.pending = Some((header, obj.etag.clone()));
+                            return Err(Error::PasswordChangedElsewhere);
+                        } else {
+                            return Err(Error::invalid(
+                                "vault.json in S3 was replaced by someone without the vault key, so it was ignored (if you changed the master password with an older version of CleanPassword, update it there)",
+                            ));
+                        }
                     }
                     self.s.header_etag = Some(obj.etag.clone());
                 }
@@ -235,6 +258,11 @@ impl Vault {
                     }
                 }
             }
+        }
+        if self.s.header_dirty && self.s.reseal {
+            // vault.bin can't be sealed with a new vault key before the
+            // vault.json that holds it is there.
+            return Err(Error::invalid("couldn't save the new master password to S3 yet; try syncing again"));
         }
         Ok(())
     }
@@ -255,7 +283,12 @@ impl Vault {
                     let obj = client.get(VAULT_OBJECT).await?;
                     progress(1, 1);
                     match obj {
-                        Some(obj) => match open_vault(&self.key, &self.header.vault_id, &obj.data)? {
+                        Some(obj) => match open_vault(&[self.key.clone()], &self.header.vault_id, &obj.data).or_else(|_| {
+                            // Still sealed with an earlier key: seal it again.
+                            let opened = open_vault(&self.keys()[1..], &self.header.vault_id, &obj.data)?;
+                            self.s.reseal = true;
+                            Ok::<_, Error>(opened)
+                        })? {
                             (_, Some(seq)) if seq < self.s.seq => (self.s.base.clone(), Some(obj.etag), true),
                             (items, seq) => {
                                 self.s.seq = seq.unwrap_or(self.s.seq);
@@ -270,7 +303,7 @@ impl Vault {
             self.s.items = merge_vault(&self.s.base, &self.s.items, &remote, &mut merged);
             self.s.base = remote;
             self.s.etag = etag.clone();
-            if etag.is_some() && !rolled_back && self.s.items == self.s.base {
+            if etag.is_some() && !rolled_back && !self.s.reseal && self.s.items == self.s.base {
                 done = true;
                 break;
             }
@@ -283,6 +316,7 @@ impl Vault {
                     self.s.base = self.s.items.clone();
                     self.s.etag = Some(etag);
                     self.s.seq = seq;
+                    self.s.reseal = false;
                     done = true;
                     break;
                 }
@@ -666,22 +700,102 @@ mod tests {
         assert!(c.get(&y).is_some());
     }
 
+    const NEW_PW: &str = "a brand new master pw";
+
     #[test]
     fn password_change_reaches_other_devices() {
         let (s3, mut a, mut b) = setup();
-        a.add(login("X", "https://x.com", "me", "1")).unwrap();
-        a.change_master_password(PW, "a brand new master pw").unwrap();
+        let x = a.add(login("X", "https://x.com", "me", "1")).unwrap();
         block_on(a.sync(&s3)).unwrap();
-        let r = block_on(b.sync(&s3)).unwrap();
-        assert!(r.password_changed_elsewhere);
-        assert_eq!(b.items().len(), 1, "items still readable");
+        block_on(b.sync(&s3)).unwrap();
+        let old_key = b.key_b64();
+        a.change_master_password(PW, NEW_PW).unwrap();
+        assert!(a.key_changed());
+        block_on(a.sync(&s3)).unwrap();
+        assert!(!a.has_unsynced_changes());
+        // The vault key changed with it: the old one doesn't read the vault.
+        assert!(open_vault(&[b.key.clone()], b.vault_id(), &vault_bin(&s3)).is_err());
+        assert!(open_vault(&[a.key.clone()], a.vault_id(), &vault_bin(&s3)).is_ok());
+
+        // b made a change meanwhile, then hears of the new password.
+        let y = b.add(login("Y", "https://y.com", "me", "2")).unwrap();
+        assert!(matches!(block_on(b.sync(&s3)), Err(Error::PasswordChangedElsewhere)));
+        assert!(b.password_changed_elsewhere());
         let saved = b.save();
-        assert!(Vault::unlock(&saved, PW).is_err());
-        assert!(Vault::unlock(&saved, "a brand new master pw").is_ok());
+        // The old password still opens what b kept (and syncing says why
+        // it can't), the new one moves b to the new key.
+        let mut old = Vault::unlock(&saved, PW).unwrap();
+        assert!(matches!(block_on(old.sync(&s3)), Err(Error::PasswordChangedElsewhere)));
+        let mut b = Vault::unlock(&saved, NEW_PW).unwrap();
+        assert!(b.key_changed() && !b.password_changed_elsewhere());
+        assert_eq!(*b.key, *a.key);
+        // b's key as kept for Face ID or a PIN no longer opens it.
+        assert!(matches!(Vault::unlock_with_key(&b.save(), &old_key), Err(Error::StaleKey)));
+        assert!(Vault::unlock(&b.save(), PW).is_err());
+        block_on(b.sync(&s3)).unwrap();
+        assert!(b.get(&x).is_some() && b.get(&y).is_some(), "b's change survived");
+        block_on(a.sync(&s3)).unwrap();
+        assert!(a.get(&y).is_some());
+
         // A new device joins with the new password.
         let (h, etag) = block_on(fetch_header(&s3, &config(), &creds())).unwrap().unwrap();
         assert!(Vault::join(config(), creds(), h.clone(), etag.clone(), PW).is_err());
-        assert!(Vault::join(config(), creds(), h, etag, "a brand new master pw").is_ok());
+        assert!(Vault::join(config(), creds(), h, etag, NEW_PW).is_ok());
+    }
+
+    #[test]
+    fn a_device_reads_vault_bin_sealed_with_the_key_before() {
+        // a uploaded vault.json with the new password, but not yet vault.bin.
+        let (s3, mut a, mut b) = setup();
+        let x = a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        let before = vault_bin(&s3);
+        a.change_master_password(PW, NEW_PW).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        s3.insert(&format!("Vault/{VAULT_OBJECT}"), before);
+        assert!(matches!(block_on(b.sync(&s3)), Err(Error::PasswordChangedElsewhere)));
+        let mut b = Vault::unlock(&b.save(), NEW_PW).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+        assert!(b.get(&x).is_some());
+        assert!(open_vault(&[b.key.clone()], b.vault_id(), &vault_bin(&s3)).is_ok(), "sealed again with the new key");
+    }
+
+    #[test]
+    fn two_password_changes_while_a_device_is_away() {
+        let (s3, mut a, b) = setup();
+        a.change_master_password(PW, NEW_PW).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        a.change_master_password(NEW_PW, "and another master pw").unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        // CleanNotes unlocks with vault.json as it is in S3 now.
+        let (h, etag) = block_on(fetch_header(&s3, &config(), &creds())).unwrap().unwrap();
+        let saved = b.save();
+        let mut b = Vault::unlock_with_header(&saved, h.clone(), etag.clone(), "and another master pw").unwrap();
+        assert!(b.key_changed());
+        block_on(b.sync(&s3)).unwrap();
+        // The password b knew still opens what it kept, and says it changed.
+        let mut old = Vault::unlock_with_header(&saved, h, etag, PW).unwrap();
+        assert!(!old.key_changed() && old.password_changed_elsewhere());
+        assert!(matches!(block_on(old.sync(&s3)), Err(Error::PasswordChangedElsewhere)));
+    }
+
+    #[test]
+    fn a_forged_password_change_never_unlocks() {
+        // Someone who can write to the bucket puts in a vault.json that
+        // looks like a password change.
+        let (s3, mut a, _) = setup();
+        let real = header_json(&s3);
+        let forged = VaultHeader::new(a.vault_id().to_owned(), "the attacker's other pw", &crypto::random_key(), Utc::now(), 5, &[crypto::random_key()]).unwrap();
+        s3.insert("Vault/vault.json", serde_json::to_vec(&forged).unwrap());
+        assert!(matches!(block_on(a.sync(&s3)), Err(Error::PasswordChangedElsewhere)));
+        let saved = a.save();
+        assert!(Vault::unlock(&saved, "the attacker's other pw").is_err());
+        let mut a = Vault::unlock(&saved, PW).unwrap();
+        assert!(!a.key_changed());
+        // Put right, syncing works again and the forgery is forgotten.
+        s3.insert("Vault/vault.json", serde_json::to_vec(&real).unwrap());
+        block_on(a.sync(&s3)).unwrap();
+        assert!(!a.password_changed_elsewhere());
     }
 
     fn header_json(s3: &FakeS3) -> serde_json::Value {
@@ -717,16 +831,18 @@ mod tests {
     fn an_older_header_put_back_is_refused() {
         let (s3, mut a, mut b) = setup();
         let old = header_json(&s3);
-        a.change_master_password(PW, "a brand new master pw").unwrap();
+        a.change_master_password(PW, NEW_PW).unwrap();
         block_on(a.sync(&s3)).unwrap();
-        assert!(block_on(b.sync(&s3)).unwrap().password_changed_elsewhere);
+        assert!(matches!(block_on(b.sync(&s3)), Err(Error::PasswordChangedElsewhere)));
+        let mut b = Vault::unlock(&b.save(), NEW_PW).unwrap();
+        block_on(b.sync(&s3)).unwrap();
         s3.insert("Vault/vault.json", serde_json::to_vec(&old).unwrap());
         for v in [&mut a, &mut b] {
             let e = block_on(v.sync(&s3)).unwrap_err();
             assert!(e.to_string().contains("older master password"), "{e}");
             let saved = v.save();
             assert!(Vault::unlock(&saved, PW).is_err());
-            assert!(Vault::unlock(&saved, "a brand new master pw").is_ok());
+            assert!(Vault::unlock(&saved, NEW_PW).is_ok());
         }
     }
 

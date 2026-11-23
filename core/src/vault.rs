@@ -129,10 +129,21 @@ pub struct VaultHeader {
     /// one on their next sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_mac: Option<String>,
+    /// The vault keys before the last few master password changes, each
+    /// sealed with the current vault key (base64), newest first. Changing
+    /// the master password makes a new vault key, so whoever knew the old
+    /// password (or had a device's old key) can't read what's saved from
+    /// then on. A device that last unlocked with an older key opens what it
+    /// kept with one of these once it's unlocked with the new password.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_keys: Vec<String>,
 }
 
+/// How many earlier vault keys a header keeps.
+const PREVIOUS_KEYS: usize = 8;
+
 impl VaultHeader {
-    fn new(vault_id: String, password: &str, key: &[u8; 32], created: DateTime<Utc>, generation: u64) -> Result<VaultHeader> {
+    pub(crate) fn new(vault_id: String, password: &str, key: &[u8; 32], created: DateTime<Utc>, generation: u64, previous: &[Key]) -> Result<VaultHeader> {
         let kdf = KdfParams::new();
         let master = crypto::derive_key(password, &kdf)?;
         let mut h = VaultHeader {
@@ -144,8 +155,10 @@ impl VaultHeader {
             created,
             generation,
             key_mac: None,
+            previous_keys: Vec::new(),
         };
         h.wrapped_key = crypto::b64(&crypto::seal(&master, &h.wrap_aad(), key));
+        h.previous_keys = previous.iter().take(PREVIOUS_KEYS).map(|k| crypto::b64(&crypto::seal(key, &h.previous_aad(), k.as_ref()))).collect();
         h.sign(key);
         Ok(h)
     }
@@ -154,9 +167,25 @@ impl VaultHeader {
         format!("cleanpassword/vault-key/v1/{}", self.vault_id).into_bytes()
     }
 
+    fn previous_aad(&self) -> Vec<u8> {
+        format!("cleanpassword/previous-key/v1/{}", self.vault_id).into_bytes()
+    }
+
+    /// The earlier vault keys, opened with the current one `key`, newest
+    /// first.
+    pub(crate) fn previous(&self, key: &[u8; 32]) -> Vec<Key> {
+        let aad = self.previous_aad();
+        self.previous_keys
+            .iter()
+            .filter_map(|p| crypto::unb64(p).ok())
+            .filter_map(|sealed| crypto::open(key, &aad, &sealed))
+            .filter_map(|k| <[u8; 32]>::try_from(k.as_slice()).ok().map(Zeroizing::new))
+            .collect()
+    }
+
     fn mac(&self, key: &[u8; 32]) -> hmac::Hmac<sha2::Sha256> {
         use hmac::Mac;
-        let signed = serde_json::to_vec(&("cleanpassword/header-mac/v1", &self.vault_id, &self.kdf, &self.wrapped_key, self.generation))
+        let signed = serde_json::to_vec(&("cleanpassword/header-mac/v1", &self.vault_id, &self.kdf, &self.wrapped_key, self.generation, &self.previous_keys))
             .expect("header fields serialize");
         let mut m = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC takes any key length");
         m.update(&signed);
@@ -228,6 +257,10 @@ pub(crate) struct Secrets {
     /// put back there and is ignored.
     #[serde(default)]
     pub seq: u64,
+    /// The vault key changed here (a new master password): `vault.bin`
+    /// needs sealing again with it, changed or not.
+    #[serde(default)]
+    pub reseal: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -240,6 +273,11 @@ struct Saved {
     data: String,
     #[serde(default)]
     last_sync: Option<DateTime<Utc>>,
+    /// A `vault.json` with a new master password (and vault key) set on
+    /// another device, and its ETag: unlocking with that password moves
+    /// this device to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending: Option<(VaultHeader, String)>,
 }
 
 /// What can be shown about a saved vault while it's locked.
@@ -292,6 +330,10 @@ pub struct Vault {
     pub(crate) key: Key,
     pub(crate) s: Secrets,
     pub(crate) last_sync: Option<DateTime<Utc>>,
+    /// See [`Saved::pending`].
+    pub(crate) pending: Option<(VaultHeader, String)>,
+    /// The vault key changed since this was unlocked.
+    pub(crate) key_changed: bool,
 }
 
 fn device_aad(vault_id: &str) -> Vec<u8> {
@@ -323,8 +365,8 @@ impl Vault {
         credentials.check()?;
         check_master_password(password)?;
         let key = crypto::random_key();
-        let header = VaultHeader::new(uuid::Uuid::new_v4().to_string(), password, &key, Utc::now(), 0)?;
-        Ok(Vault { config, header, key, s: Secrets::new(credentials), last_sync: None })
+        let header = VaultHeader::new(uuid::Uuid::new_v4().to_string(), password, &key, Utc::now(), 0, &[])?;
+        Ok(Vault { config, header, key, s: Secrets::new(credentials), last_sync: None, pending: None, key_changed: false })
     }
 
     /// Joins the vault already in an S3 folder (`header` and its ETag from
@@ -335,31 +377,107 @@ impl Vault {
         let key = header.unwrap_key(password)?;
         let mut s = Secrets::new(credentials);
         s.header_etag = Some(header_etag);
-        Ok(Vault { config, header, key, s, last_sync: None })
+        Ok(Vault { config, header, key, s, last_sync: None, pending: None, key_changed: false })
     }
 
-    /// Opens what [`Vault::save`] made with the master password.
+    /// Opens what [`Vault::save`] made with the master password: the new
+    /// one if another device changed it (and this one heard of it when it
+    /// last synced), or the one this device knew.
     pub fn unlock(saved: &str, password: &str) -> Result<Vault> {
-        let saved = parse_saved(saved)?;
+        let mut saved = parse_saved(saved)?;
+        let pending = saved.pending.take();
+        Self::unlock_saved(saved, pending, password)
+    }
+
+    /// [`Vault::unlock`], with `vault.json` and its ETag as they are in S3
+    /// now (from [`crate::sync::fetch_header`]): with a master password
+    /// changed on another device, the new password unlocks.
+    pub fn unlock_with_header(saved: &str, header: VaultHeader, header_etag: String, password: &str) -> Result<Vault> {
+        let mut saved = parse_saved(saved)?;
+        let pending = saved.pending.take().filter(|(p, _)| p.generation > header.generation).or(Some((header, header_etag)));
+        Self::unlock_saved(saved, pending, password)
+    }
+
+    fn unlock_saved(saved: Saved, pending: Option<(VaultHeader, String)>, password: &str) -> Result<Vault> {
+        if let Some((header, etag)) = pending {
+            if header.vault_id == saved.header.vault_id && header.generation > saved.header.generation && header.wrapped_key != saved.header.wrapped_key {
+                match Self::open_rekeyed(&saved, header.clone(), etag.clone(), password) {
+                    Ok(v) => return Ok(v),
+                    // Not the new password: perhaps still the old one, which
+                    // opens what's here (and syncing says it changed).
+                    Err(Error::WrongPassword) => {}
+                    Err(e) => return Err(e),
+                }
+                let key = saved.header.unwrap_key(password)?;
+                let mut v = Self::open_saved(&saved, key)?;
+                v.pending = Some((header, etag));
+                return Ok(v);
+            }
+        }
         let key = saved.header.unwrap_key(password)?;
-        Self::open_saved(saved, key)
+        Self::open_saved(&saved, key)
+    }
+
+    /// Moves what this device kept to `header`, a new master password and
+    /// vault key set elsewhere: what's kept was sealed with an earlier key,
+    /// which `header` holds (sealed with the new key).
+    fn open_rekeyed(saved: &Saved, header: VaultHeader, etag: String, password: &str) -> Result<Vault> {
+        let key = header.unwrap_key(password)?;
+        if !header.signed_by(&key) {
+            return Err(Error::invalid("vault.json in S3 wasn't written by CleanPassword"));
+        }
+        for old in header.previous(&key) {
+            if let Ok(mut v) = Self::open_saved(saved, old) {
+                v.header = header;
+                v.key = key;
+                v.s.header_etag = Some(etag);
+                v.s.header_dirty = false;
+                // Downloaded again (sealed with the new key), and merged with
+                // what's here.
+                v.s.etag = None;
+                v.key_changed = true;
+                return Ok(v);
+            }
+        }
+        Err(Error::invalid(
+            "the master password was changed too many times since this device last unlocked; remove the vault from this device and add it again",
+        ))
     }
 
     /// Opens what [`Vault::save`] made with the vault key itself (from
     /// [`Vault::key_b64`], kept in the iOS keychain behind Face ID, or in
     /// the browser's session storage while unlocked).
     pub fn unlock_with_key(saved: &str, key_b64: &str) -> Result<Vault> {
-        let saved = parse_saved(saved)?;
+        let mut saved = parse_saved(saved)?;
         let key = crypto::key_from_b64(key_b64)?;
-        Self::open_saved(saved, key)
+        let pending = saved.pending.take();
+        let mut v = Self::open_saved(&saved, key).map_err(|e| match e {
+            Error::WrongPassword => Error::StaleKey,
+            e => e,
+        })?;
+        v.pending = pending;
+        Ok(v)
     }
 
-    fn open_saved(saved: Saved, key: Key) -> Result<Vault> {
-        let header = saved.header;
+    fn open_saved(saved: &Saved, key: Key) -> Result<Vault> {
+        let header = saved.header.clone();
         let sealed = crypto::unb64(&saved.data)?;
         let plain = crypto::open(&key, &device_aad(&header.vault_id), &sealed).ok_or(Error::WrongPassword)?;
         let s: Secrets = serde_json::from_slice(&plain).map_err(|e| Error::invalid(format!("the saved vault is damaged ({e})")))?;
-        Ok(Vault { config: saved.config, header, key, s, last_sync: saved.last_sync })
+        Ok(Vault { config: saved.config.clone(), header, key, s, last_sync: saved.last_sync, pending: None, key_changed: false })
+    }
+
+    /// Whether the vault key changed since this was unlocked (a new master
+    /// password, here or elsewhere): a copy of [`Vault::key_b64`] kept for
+    /// unlocking without the password (Face ID, a PIN) needs replacing.
+    pub fn key_changed(&self) -> bool {
+        self.key_changed
+    }
+
+    /// Whether another device changed the master password: syncing waits
+    /// until this device is unlocked with the new one.
+    pub fn password_changed_elsewhere(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// What the device keeps: everything but the S3 settings sealed.
@@ -373,6 +491,7 @@ impl Vault {
             header: self.header.clone(),
             data,
             last_sync: self.last_sync,
+            pending: self.pending.clone(),
         };
         serde_json::to_string(&saved).expect("saved vault serializes")
     }
@@ -689,23 +808,51 @@ impl Vault {
 
     // ---- Master password -----------------------------------------------------
 
-    /// Changes the master password (and makes a new salt). Other devices
-    /// need the new one from their next sync on.
+    /// Whether `password` is the master password (to confirm it's the user
+    /// before something sensitive: an export, a verified passkey sign-in).
+    pub fn verify_master_password(&self, password: &str) -> Result<()> {
+        let key = self.header.unwrap_key(password)?;
+        if *key != *self.key {
+            return Err(Error::WrongPassword);
+        }
+        Ok(())
+    }
+
+    /// Every item, unencrypted (Bitwarden's JSON), if `password` is the
+    /// master password: an unlocked vault alone isn't enough.
+    pub fn export_json(&self, password: &str) -> Result<String> {
+        self.verify_master_password(password)?;
+        Ok(crate::import::export_bitwarden_json(&self.items()))
+    }
+
+    /// Changes the master password, and the vault key with it: whoever knew
+    /// the old password, or took a device's key, can't read what's saved
+    /// from then on. Other devices need the new password from their next
+    /// sync on ([`Error::PasswordChangedElsewhere`]); a copy of the key kept
+    /// for unlocking without the password needs replacing
+    /// ([`Vault::key_changed`]).
     pub fn change_master_password(&mut self, current: &str, new: &str) -> Result<()> {
         check_master_password(new)?;
         let key = self.header.unwrap_key(current)?;
         if *key != *self.key {
             return Err(Error::WrongPassword);
         }
-        self.header = VaultHeader::new(self.header.vault_id.clone(), new, &self.key, self.header.created, self.header.generation + 1)?;
+        let mut previous = vec![self.key.clone()];
+        previous.extend(self.header.previous(&self.key));
+        let new_key = crypto::random_key();
+        self.header = VaultHeader::new(self.header.vault_id.clone(), new, &new_key, self.header.created, self.header.generation + 1, &previous)?;
+        self.key = new_key;
         self.s.header_dirty = true;
+        self.s.reseal = true;
+        self.key_changed = true;
+        self.pending = None;
         Ok(())
     }
 }
 
 impl Secrets {
     fn new(credentials: AwsCredentials) -> Secrets {
-        Secrets { credentials, items: BTreeMap::new(), base: BTreeMap::new(), etag: None, header_etag: None, header_dirty: false, seq: 0 }
+        Secrets { credentials, items: BTreeMap::new(), base: BTreeMap::new(), etag: None, header_etag: None, header_dirty: false, seq: 0, reseal: false }
     }
 }
 
@@ -815,6 +962,7 @@ pub(crate) mod tests {
             user_handle: b"bob".to_vec(),
             user_name: "bob@example.com".into(),
             user_display_name: "Bob".into(),
+            user_verified: true,
         };
         let pk = v.create_passkey(&req, None).unwrap().item_id;
         assert_ne!(pk, with_pw, "bob's passkey gets a login of its own");

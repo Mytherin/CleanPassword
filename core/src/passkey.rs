@@ -202,6 +202,14 @@ pub struct NewPasskey {
     pub user_name: String,
     #[serde(default)]
     pub user_display_name: String,
+    /// Whether the user was verified (Face ID, a PIN, the master password
+    /// just now), not only present: the UV flag the site sees.
+    #[serde(default = "verified")]
+    pub user_verified: bool,
+}
+
+fn verified() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,13 +340,21 @@ impl Vault {
                 id
             }
         };
-        let authenticator_data = auth_data(&rp_id, UP | UV | BE | BS | AT, 0, Some((&id, &vk)));
+        let uv = if req.user_verified { UV } else { 0 };
+        let authenticator_data = auth_data(&rp_id, UP | uv | BE | BS | AT, 0, Some((&id, &vk)));
         Ok(Registration { item_id, credential_id: id.to_vec(), attestation_object: attestation_none(&authenticator_data), authenticator_data, public_key: spki(&vk) })
     }
 
-    /// Signs in with a passkey: `client_data_hash` is SHA-256 of the
+    /// Signs in with a passkey, the user verified (with Face ID, a PIN or
+    /// the master password just now): `client_data_hash` is SHA-256 of the
     /// client data.
     pub fn assert_passkey(&mut self, item_id: &str, credential_id: &[u8], rp_id: &str, client_data_hash: &[u8]) -> Result<Assertion> {
+        self.assert_passkey_as(item_id, credential_id, rp_id, client_data_hash, true)
+    }
+
+    /// [`Vault::assert_passkey`], telling the site whether the user was
+    /// verified (the UV flag) or only present (a click in an unlocked vault).
+    pub fn assert_passkey_as(&mut self, item_id: &str, credential_id: &[u8], rp_id: &str, client_data_hash: &[u8], user_verified: bool) -> Result<Assertion> {
         if client_data_hash.len() != 32 {
             return Err(Error::invalid("the client data hash must be 32 bytes"));
         }
@@ -358,7 +374,7 @@ impl Vault {
         if p.counter > 0 && p.counter < u32::MAX {
             p.counter += 1;
         }
-        let data = auth_data(&p.rp_id, UP | UV | BE | BS, p.counter, None);
+        let data = auth_data(&p.rp_id, if user_verified { UP | UV | BE | BS } else { UP | BE | BS }, p.counter, None);
         let mut signed = data.clone();
         signed.extend_from_slice(client_data_hash);
         let sig: Signature = sk.sign(&signed);
@@ -437,7 +453,27 @@ mod tests {
     use crate::vault::tests::{config, creds, login, PW};
 
     fn request(user: &str) -> NewPasskey {
-        NewPasskey { rp_id: "example.com".into(), rp_name: "Example".into(), user_handle: user.as_bytes().to_vec(), user_name: format!("{user}@example.com"), user_display_name: user.into() }
+        NewPasskey { rp_id: "example.com".into(), rp_name: "Example".into(), user_handle: user.as_bytes().to_vec(), user_name: format!("{user}@example.com"), user_display_name: user.into(), user_verified: true }
+    }
+
+    #[test]
+    fn user_verification_is_claimed_only_when_it_happened() {
+        let mut v = Vault::create(config(), creds(), PW).unwrap();
+        let mut req = request("alice");
+        req.user_verified = false;
+        let r = v.create_passkey(&req, None).unwrap();
+        assert_eq!(r.authenticator_data[32], UP | BE | BS | AT);
+        let a = v.assert_passkey_as(&r.item_id, &r.credential_id, "example.com", &[7; 32], false).unwrap();
+        assert_eq!(a.authenticator_data[32], UP | BE | BS);
+        let a = v.assert_passkey_as(&r.item_id, &r.credential_id, "example.com", &[7; 32], true).unwrap();
+        assert_eq!(a.authenticator_data[32], UP | UV | BE | BS);
+    }
+
+    #[test]
+    fn exporting_needs_the_master_password() {
+        let v = Vault::create(config(), creds(), PW).unwrap();
+        assert!(matches!(v.export_json("not it at all"), Err(Error::WrongPassword)));
+        assert!(v.export_json(PW).is_ok());
     }
 
     #[test]

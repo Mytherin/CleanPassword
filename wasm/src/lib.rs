@@ -37,8 +37,11 @@ fn from_js<T: DeserializeOwned>(v: JsValue) -> Result<T, JsError> {
 /// password, so the UI can tell.
 fn err(e: Error) -> JsValue {
     let js = js_sys::Error::new(&e.to_string());
-    if matches!(e, Error::WrongPassword) {
-        js.set_name("WrongPassword");
+    match e {
+        Error::WrongPassword => js.set_name("WrongPassword"),
+        Error::PasswordChangedElsewhere => js.set_name("PasswordChangedElsewhere"),
+        Error::StaleKey => js.set_name("StaleKey"),
+        _ => {}
     }
     js.into()
 }
@@ -247,10 +250,24 @@ impl Session {
         to_js(&ImportResult { added: s.added, skipped: s.skipped, merged: s.merged, warnings }).map_err(bad)
     }
 
-    /// Every item as an unencrypted Bitwarden JSON export.
+    /// Every item as an unencrypted Bitwarden JSON export, if `password`
+    /// is the master password.
     #[wasm_bindgen(js_name = exportJson)]
-    pub fn export_json(&self) -> JsResult<String> {
-        self.with(|v| import::export_bitwarden_json(&v.items()))
+    pub fn export_json(&self, password: &str) -> JsResult<String> {
+        self.with(|v| v.export_json(password))?.map_err(err)
+    }
+
+    /// Fails (`WrongPassword`) unless `password` is the master password.
+    #[wasm_bindgen(js_name = verifyMasterPassword)]
+    pub fn verify_master_password(&self, password: &str) -> JsResult<()> {
+        self.with(|v| v.verify_master_password(password))?.map_err(err)
+    }
+
+    /// The vault key changed since unlocking (a new master password): a
+    /// copy of `keyB64()` kept elsewhere needs replacing.
+    #[wasm_bindgen(js_name = keyChanged)]
+    pub fn key_changed(&self) -> JsResult<bool> {
+        self.with(|v| v.key_changed())
     }
 
     #[wasm_bindgen(js_name = changeMasterPassword)]
@@ -319,6 +336,8 @@ impl Session {
             user_name: String,
             #[serde(default)]
             user_display_name: String,
+            #[serde(default)]
+            user_verified: bool,
         }
         let r: Req = from_js(request).map_err(bad)?;
         let req = passkey::NewPasskey {
@@ -327,6 +346,7 @@ impl Session {
             user_handle: passkey::unb64(&r.user_handle).map_err(err)?,
             user_name: r.user_name,
             user_display_name: r.user_display_name,
+            user_verified: r.user_verified,
         };
         let target = item_id.as_deref().filter(|s| !s.is_empty()).map_or(PasskeyTarget::New, PasskeyTarget::Item);
         let reg = self.with_mut(|v| v.create_passkey_on(&req, target))?.map_err(err)?;
@@ -341,12 +361,13 @@ impl Session {
     }
 
     /// Signs in with a passkey: `{credential_id, authenticator_data,
-    /// signature, user_handle}`.
+    /// signature, user_handle}`. `user_verified`: the master password was
+    /// entered for it (or the vault unlocked with it just before).
     #[wasm_bindgen(js_name = assertPasskey)]
-    pub fn assert_passkey(&self, item_id: &str, credential_id: &str, rp_id: &str, client_data_hash: &str) -> JsResult<JsValue> {
+    pub fn assert_passkey(&self, item_id: &str, credential_id: &str, rp_id: &str, client_data_hash: &str, user_verified: bool) -> JsResult<JsValue> {
         let id = passkey::unb64(credential_id).map_err(err)?;
         let hash = passkey::unb64(client_data_hash).map_err(err)?;
-        let a = self.with_mut(|v| v.assert_passkey(item_id, &id, rp_id, &hash))?.map_err(err)?;
+        let a = self.with_mut(|v| v.assert_passkey_as(item_id, &id, rp_id, &hash, user_verified))?.map_err(err)?;
         to_js(&serde_json::json!({
             "credential_id": passkey::b64url(&a.credential_id),
             "authenticator_data": passkey::b64url(&a.authenticator_data),

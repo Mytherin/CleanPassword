@@ -584,12 +584,32 @@ impl VaultSession {
     }
 
     /// Everything as an unencrypted Bitwarden JSON export.
-    pub fn export_json(&self) -> String {
-        import::export_bitwarden_json(&self.v().items())
+    /// Every item, unencrypted (Bitwarden's JSON), if `master_password` is
+    /// the master password.
+    pub fn export_json(&self, master_password: String) -> R<String> {
+        Ok(self.v().export_json(&master_password)?)
     }
 
     pub fn change_master_password(&self, current: String, new_password: String) -> R<()> {
         Ok(self.v().change_master_password(&current, &new_password)?)
+    }
+
+    /// Fails (`WrongPassword`) unless `password` is the master password.
+    pub fn verify_master_password(&self, password: String) -> R<()> {
+        Ok(self.v().verify_master_password(&password)?)
+    }
+
+    /// The vault key changed since unlocking (a new master password, here
+    /// or on another device): the Face ID copy needs replacing, and a PIN
+    /// setting up again.
+    pub fn key_changed(&self) -> bool {
+        self.v().key_changed()
+    }
+
+    /// Another device changed the master password: syncing waits until
+    /// this one is unlocked with the new one.
+    pub fn password_changed_elsewhere(&self) -> bool {
+        self.v().password_changed_elsewhere()
     }
 
     pub fn set_keys(&self, keys: AwsKeys) -> R<()> {
@@ -638,7 +658,9 @@ impl VaultSession {
     /// Creates a passkey and saves it on a login: `item_id`, the one the
     /// user chose, or `None` for a new login ("A New Login").
     pub fn create_passkey(&self, rp_id: String, rp_name: String, user_handle: Vec<u8>, user_name: String, user_display_name: String, item_id: Option<String>) -> R<PasskeyRegistration> {
-        let req = NewPasskey { rp_id, rp_name, user_handle, user_name, user_display_name };
+        // Unlocked in the AutoFill extension with Face ID, a PIN or the
+        // master password just now: verified.
+        let req = NewPasskey { rp_id, rp_name, user_handle, user_name, user_display_name, user_verified: true };
         let r = self.v().create_passkey_on(&req, item_id.as_deref().map_or(PasskeyTarget::New, PasskeyTarget::Item))?;
         Ok(PasskeyRegistration { item_id: r.item_id, credential_id: r.credential_id, attestation_object: r.attestation_object })
     }

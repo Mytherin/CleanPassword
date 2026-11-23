@@ -10,6 +10,15 @@ pub enum Error {
     /// The S3 folder holds another vault than this device's.
     #[error("this S3 folder holds a different vault")]
     DifferentVault,
+    /// Another device changed the master password (and the vault key):
+    /// lock, and unlock with the new password.
+    #[error("the master password was changed on another device: lock the vault and unlock it with the new master password")]
+    PasswordChangedElsewhere,
+    /// A copy of the vault key kept for unlocking without the master
+    /// password (Face ID, a PIN, a browser session) from before the master
+    /// password changed.
+    #[error("the master password was changed: unlock with the master password")]
+    StaleKey,
     #[error("{0}")]
     S3(#[from] crate::s3::S3Error),
     #[error("couldn't reach S3: {0}")]

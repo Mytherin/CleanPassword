@@ -112,10 +112,14 @@ pub fn match_uri(saved: &ItemUri, page: &Page) -> Option<Quality> {
             if !secure_enough(&s, page) {
                 return None;
             }
-            // A saved port other than the scheme's default must match.
-            let saved_port_explicit = url::Url::parse(&s.url).ok().and_then(|u| u.port()).is_some();
-            if saved_port_explicit && s.port != page.port {
-                return None;
+            // A saved port other than the scheme's default must match, and
+            // a page on a port other than its scheme's default is another
+            // site (another origin) than one saved without a port.
+            let explicit = |p: &Page| url::Url::parse(&p.url).ok().and_then(|u| u.port());
+            match (explicit(&s), explicit(page)) {
+                (Some(_), _) if s.port != page.port => return None,
+                (None, Some(_)) => return None,
+                _ => {}
             }
             if s.host == page.host {
                 Some(Quality::Host)
@@ -263,7 +267,10 @@ mod tests {
     fn ports() {
         assert_eq!(q("https://example.com:8443", None, "https://example.com/"), None);
         assert_eq!(q("https://example.com:8443", None, "https://example.com:8443/x"), Some(Quality::Host));
-        assert_eq!(q("https://example.com", None, "https://example.com:8443/"), Some(Quality::Host));
+        // Another origin: whatever listens on another port isn't the site.
+        assert_eq!(q("https://example.com", None, "https://example.com:8443/"), None);
+        assert_eq!(q("example.com", None, "https://example.com:443/"), Some(Quality::Host));
+        assert_eq!(q("http://example.com", None, "https://example.com/"), Some(Quality::Host));
     }
 
     #[test]
