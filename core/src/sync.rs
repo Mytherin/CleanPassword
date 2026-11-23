@@ -66,6 +66,12 @@ pub struct SyncReport {
 #[derive(Serialize, Deserialize)]
 struct Stored {
     items: Vec<Item>,
+    /// One more with every save, so a device can tell an older copy put
+    /// back in S3 (which would read as every item added since having been
+    /// deleted) from a newer one. `None` in vaults saved by versions before
+    /// it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
 }
 
 fn vault_aad(vault_id: &str) -> Vec<u8> {
@@ -76,8 +82,8 @@ fn pad_block(len: usize) -> usize {
     PAD.max(len.next_power_of_two() / 8)
 }
 
-fn seal_vault(key: &[u8; 32], vault_id: &str, items: &BTreeMap<String, Item>) -> Vec<u8> {
-    let stored = Stored { items: items.values().cloned().collect() };
+fn seal_vault(key: &[u8; 32], vault_id: &str, items: &BTreeMap<String, Item>, seq: u64) -> Vec<u8> {
+    let stored = Stored { items: items.values().cloned().collect(), seq: Some(seq) };
     let json = Zeroizing::new(serde_json::to_vec(&stored).expect("items serialize"));
     let plain = Zeroizing::new(crypto::pad(json.to_vec(), pad_block(json.len())));
     let mut out = MAGIC.to_vec();
@@ -85,11 +91,11 @@ fn seal_vault(key: &[u8; 32], vault_id: &str, items: &BTreeMap<String, Item>) ->
     out
 }
 
-fn open_vault(key: &[u8; 32], vault_id: &str, data: &[u8]) -> Result<BTreeMap<String, Item>> {
+fn open_vault(key: &[u8; 32], vault_id: &str, data: &[u8]) -> Result<(BTreeMap<String, Item>, Option<u64>)> {
     let unreadable = || Error::invalid("the vault in S3 (vault.bin) can't be decrypted: it's damaged, or was written with another key");
     let plain = crypto::open(key, &vault_aad(vault_id), data.strip_prefix(MAGIC).ok_or_else(unreadable)?).ok_or_else(unreadable)?;
     let stored: Stored = serde_json::from_slice(&plain).map_err(|_| unreadable())?;
-    Ok(stored.items.into_iter().map(|i| (i.id.clone(), i)).collect())
+    Ok((stored.items.into_iter().map(|i| (i.id.clone(), i)).collect(), stored.seq))
 }
 
 /// Three-way merge of the vault, item by item: `base` is what this device
@@ -196,12 +202,30 @@ impl Vault {
                 if self.s.header_etag.as_deref() != Some(obj.etag.as_str()) {
                     if header.wrapped_key != self.header.wrapped_key {
                         // A new master password, set on another device (it
-                        // wins over one set here at the same time).
+                        // wins over one set here at the same time), if that
+                        // device holds the vault key and it isn't an older
+                        // header put back. Anything else is refused and left
+                        // alone: adopting it would lock every device out.
+                        if !header.signed_by(&self.key) {
+                            return Err(Error::invalid(
+                                "vault.json in S3 was replaced by someone without the vault key, so it was ignored (if you changed the master password with an older version of CleanPassword, update it there)",
+                            ));
+                        }
+                        if header.generation < self.header.generation {
+                            return Err(Error::invalid(
+                                "vault.json in S3 was put back to an older master password, so it was ignored (change the master password again to replace it)",
+                            ));
+                        }
                         self.header = header;
                         self.s.header_dirty = false;
                         report.password_changed_elsewhere = true;
                     }
                     self.s.header_etag = Some(obj.etag.clone());
+                }
+                if !self.header.signed_by(&self.key) {
+                    // A vault made before vault.json was signed: sign it now.
+                    self.header.sign(&self.key);
+                    self.s.header_dirty = true;
                 }
                 if self.s.header_dirty {
                     let body = serde_json::to_vec_pretty(&self.header).expect("header serializes");
@@ -222,33 +246,43 @@ impl Vault {
         for _ in 0..RETRIES {
             // What's in S3 now, and its ETag (`None`: there's no vault.bin).
             // Unchanged since the last sync, it's the synced copy.
-            let (remote, etag) = match client.head(VAULT_OBJECT).await? {
-                Some(e) if self.s.etag.as_ref() == Some(&e) => (self.s.base.clone(), Some(e)),
+            // An older copy than the one last synced, put back by someone
+            // who can write to the bucket, is ignored and replaced.
+            let (remote, etag, rolled_back) = match client.head(VAULT_OBJECT).await? {
+                Some(e) if self.s.etag.as_ref() == Some(&e) => (self.s.base.clone(), Some(e), false),
                 Some(_) => {
                     progress(0, 1);
                     let obj = client.get(VAULT_OBJECT).await?;
                     progress(1, 1);
                     match obj {
-                        Some(obj) => (open_vault(&self.key, &self.header.vault_id, &obj.data)?, Some(obj.etag)),
-                        None => (self.s.base.clone(), None),
+                        Some(obj) => match open_vault(&self.key, &self.header.vault_id, &obj.data)? {
+                            (_, Some(seq)) if seq < self.s.seq => (self.s.base.clone(), Some(obj.etag), true),
+                            (items, seq) => {
+                                self.s.seq = seq.unwrap_or(self.s.seq);
+                                (items, Some(obj.etag), false)
+                            }
+                        },
+                        None => (self.s.base.clone(), None, false),
                     }
                 }
-                None => (self.s.base.clone(), None),
+                None => (self.s.base.clone(), None, false),
             };
             self.s.items = merge_vault(&self.s.base, &self.s.items, &remote, &mut merged);
             self.s.base = remote;
             self.s.etag = etag.clone();
-            if etag.is_some() && self.s.items == self.s.base {
+            if etag.is_some() && !rolled_back && self.s.items == self.s.base {
                 done = true;
                 break;
             }
-            let body = seal_vault(&self.key, &self.header.vault_id, &self.s.items);
+            let seq = self.s.seq + 1;
+            let body = seal_vault(&self.key, &self.header.vault_id, &self.s.items, seq);
             let cond = etag.as_deref().map_or(Cond::Absent, Cond::Match);
             match client.put(VAULT_OBJECT, body, cond).await? {
                 Put::Stored { etag } => {
                     report.uploaded += changed(&self.s.base, &self.s.items);
                     self.s.base = self.s.items.clone();
                     self.s.etag = Some(etag);
+                    self.s.seq = seq;
                     done = true;
                     break;
                 }
@@ -648,6 +682,108 @@ mod tests {
         let (h, etag) = block_on(fetch_header(&s3, &config(), &creds())).unwrap().unwrap();
         assert!(Vault::join(config(), creds(), h.clone(), etag.clone(), PW).is_err());
         assert!(Vault::join(config(), creds(), h, etag, "a brand new master pw").is_ok());
+    }
+
+    fn header_json(s3: &FakeS3) -> serde_json::Value {
+        serde_json::from_slice(&s3.objects.borrow()["Vault/vault.json"].0).unwrap()
+    }
+
+    #[test]
+    fn a_header_written_without_the_vault_key_is_refused() {
+        // Someone who can write to the bucket, but has neither the master
+        // password nor the vault key, puts in a vault.json of their own
+        // (with or without a MAC of their own) under this vault's id.
+        let (s3, mut a, _) = setup();
+        a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        let real = header_json(&s3);
+        let mut forged = serde_json::to_value(&Vault::create(config(), creds(), "the attacker's password").unwrap().header).unwrap();
+        forged["vault_id"] = real["vault_id"].clone();
+        for mac in [forged["key_mac"].clone(), serde_json::Value::Null] {
+            forged["key_mac"] = mac;
+            s3.insert("Vault/vault.json", serde_json::to_vec(&forged).unwrap());
+            let e = block_on(a.sync(&s3)).unwrap_err();
+            assert!(e.to_string().contains("without the vault key"), "{e}");
+            assert!(Vault::unlock(&a.save(), PW).is_ok(), "still unlocks with the master password");
+            assert_eq!(header_json(&s3), forged, "left alone");
+        }
+        // Put right, syncing works again.
+        s3.insert("Vault/vault.json", serde_json::to_vec(&real).unwrap());
+        block_on(a.sync(&s3)).unwrap();
+        assert_eq!(a.items().len(), 1);
+    }
+
+    #[test]
+    fn an_older_header_put_back_is_refused() {
+        let (s3, mut a, mut b) = setup();
+        let old = header_json(&s3);
+        a.change_master_password(PW, "a brand new master pw").unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        assert!(block_on(b.sync(&s3)).unwrap().password_changed_elsewhere);
+        s3.insert("Vault/vault.json", serde_json::to_vec(&old).unwrap());
+        for v in [&mut a, &mut b] {
+            let e = block_on(v.sync(&s3)).unwrap_err();
+            assert!(e.to_string().contains("older master password"), "{e}");
+            let saved = v.save();
+            assert!(Vault::unlock(&saved, PW).is_err());
+            assert!(Vault::unlock(&saved, "a brand new master pw").is_ok());
+        }
+    }
+
+    #[test]
+    fn an_older_vault_put_back_is_replaced_not_merged() {
+        // Someone who can write to the bucket puts back an older vault.bin
+        // (sealed with the right key): it must not read as every item
+        // added since having been deleted.
+        let (s3, mut a, mut b) = setup();
+        a.add(login("Old", "https://old.com", "me", "1")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        let old = vault_bin(&s3);
+        let new = a.add(login("New", "https://new.com", "me", "2")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+        s3.insert(&format!("Vault/{VAULT_OBJECT}"), old);
+        for v in [&mut b, &mut a] {
+            let r = block_on(v.sync(&s3)).unwrap();
+            assert_eq!(r.removed, 0);
+            assert!(v.get(&new).is_some());
+        }
+        // The latest copy was put back for everyone.
+        let mut c = join(&s3);
+        assert!(block_on(c.sync(&s3)).is_ok());
+        assert_eq!(c.items().len(), 2);
+    }
+
+    #[test]
+    fn a_vault_saved_without_a_counter_still_merges() {
+        // vault.bin as versions before the save counter wrote it.
+        let (s3, mut a, mut b) = setup();
+        a.add(login("X", "https://x.com", "me", "1")).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+        b.add(login("Y", "https://y.com", "me", "2")).unwrap();
+        let items: BTreeMap<String, Item> = b.s.items.clone();
+        let stored = serde_json::to_vec(&serde_json::json!({ "items": items.values().collect::<Vec<_>>() })).unwrap();
+        let mut legacy = MAGIC.to_vec();
+        legacy.extend(crypto::seal(&b.key, &vault_aad(b.vault_id()), &stored));
+        s3.insert(&format!("Vault/{VAULT_OBJECT}"), legacy);
+        let r = block_on(a.sync(&s3)).unwrap();
+        assert_eq!(r.downloaded, 1);
+        assert_eq!(a.items().len(), 2);
+    }
+
+    #[test]
+    fn an_unsigned_header_gets_signed() {
+        // A vault from before vault.json carried a MAC.
+        let s3 = FakeS3::new();
+        let mut a = Vault::create(config(), creds(), PW).unwrap();
+        a.header.key_mac = None;
+        block_on(a.sync(&s3)).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        assert!(header_json(&s3)["key_mac"].is_string());
+        let (h, _) = block_on(fetch_header(&s3, &config(), &creds())).unwrap().unwrap();
+        assert!(h.signed_by(&a.key));
+        assert!(Vault::unlock(&a.save(), PW).is_ok());
     }
 
     #[test]

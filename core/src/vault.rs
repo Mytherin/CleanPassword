@@ -116,19 +116,64 @@ pub struct VaultHeader {
     /// The vault key sealed with the master key (base64).
     pub wrapped_key: String,
     pub created: DateTime<Utc>,
+    /// Counts master password changes, so a device never goes back to an
+    /// older `vault.json` (and an old master password) put back in S3.
+    #[serde(default)]
+    pub generation: u64,
+    /// HMAC-SHA256 with the vault key of everything above that matters
+    /// (base64): proof that whoever wrote this `vault.json` holds the vault
+    /// key. Without it, anyone able to write to the bucket could replace the
+    /// header with one wrapping a key nobody knows, and every device would
+    /// adopt it as "the master password was changed elsewhere" and stop
+    /// unlocking. `None` only in vaults made before it existed; those get
+    /// one on their next sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_mac: Option<String>,
 }
 
 impl VaultHeader {
-    fn new(vault_id: String, password: &str, key: &[u8; 32], created: DateTime<Utc>) -> Result<VaultHeader> {
+    fn new(vault_id: String, password: &str, key: &[u8; 32], created: DateTime<Utc>, generation: u64) -> Result<VaultHeader> {
         let kdf = KdfParams::new();
         let master = crypto::derive_key(password, &kdf)?;
-        let mut h = VaultHeader { format: VAULT_FORMAT.into(), version: VAULT_VERSION, vault_id, kdf, wrapped_key: String::new(), created };
+        let mut h = VaultHeader {
+            format: VAULT_FORMAT.into(),
+            version: VAULT_VERSION,
+            vault_id,
+            kdf,
+            wrapped_key: String::new(),
+            created,
+            generation,
+            key_mac: None,
+        };
         h.wrapped_key = crypto::b64(&crypto::seal(&master, &h.wrap_aad(), key));
+        h.sign(key);
         Ok(h)
     }
 
     fn wrap_aad(&self) -> Vec<u8> {
         format!("cleanpassword/vault-key/v1/{}", self.vault_id).into_bytes()
+    }
+
+    fn mac(&self, key: &[u8; 32]) -> hmac::Hmac<sha2::Sha256> {
+        use hmac::Mac;
+        let signed = serde_json::to_vec(&("cleanpassword/header-mac/v1", &self.vault_id, &self.kdf, &self.wrapped_key, self.generation))
+            .expect("header fields serialize");
+        let mut m = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC takes any key length");
+        m.update(&signed);
+        m
+    }
+
+    /// Sets [`VaultHeader::key_mac`] for the vault key `key`.
+    pub(crate) fn sign(&mut self, key: &[u8; 32]) {
+        use hmac::Mac;
+        self.key_mac = Some(crypto::b64(&self.mac(key).finalize().into_bytes()));
+    }
+
+    /// Whether this header was written by someone holding the vault key.
+    pub(crate) fn signed_by(&self, key: &[u8; 32]) -> bool {
+        use hmac::Mac;
+        let Some(tag) = self.key_mac.as_deref().and_then(|t| crypto::unb64(t).ok()) else { return false };
+        self.mac(key).verify_slice(&tag).is_ok()
     }
 
     pub fn check(&self) -> Result<()> {
@@ -179,6 +224,10 @@ pub(crate) struct Secrets {
     /// uploading.
     #[serde(default)]
     pub header_dirty: bool,
+    /// `vault.bin`'s save counter as last synced: an older one in S3 was
+    /// put back there and is ignored.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -274,7 +323,7 @@ impl Vault {
         credentials.check()?;
         check_master_password(password)?;
         let key = crypto::random_key();
-        let header = VaultHeader::new(uuid::Uuid::new_v4().to_string(), password, &key, Utc::now())?;
+        let header = VaultHeader::new(uuid::Uuid::new_v4().to_string(), password, &key, Utc::now(), 0)?;
         Ok(Vault { config, header, key, s: Secrets::new(credentials), last_sync: None })
     }
 
@@ -648,7 +697,7 @@ impl Vault {
         if *key != *self.key {
             return Err(Error::WrongPassword);
         }
-        self.header = VaultHeader::new(self.header.vault_id.clone(), new, &self.key, self.header.created)?;
+        self.header = VaultHeader::new(self.header.vault_id.clone(), new, &self.key, self.header.created, self.header.generation + 1)?;
         self.s.header_dirty = true;
         Ok(())
     }
@@ -656,7 +705,7 @@ impl Vault {
 
 impl Secrets {
     fn new(credentials: AwsCredentials) -> Secrets {
-        Secrets { credentials, items: BTreeMap::new(), base: BTreeMap::new(), etag: None, header_etag: None, header_dirty: false }
+        Secrets { credentials, items: BTreeMap::new(), base: BTreeMap::new(), etag: None, header_etag: None, header_dirty: false, seq: 0 }
     }
 }
 
