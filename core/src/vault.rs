@@ -535,22 +535,37 @@ impl Vault {
 
     // ---- Items -----------------------------------------------------------
 
+    // Items of kinds from newer versions ([`ItemKind::Unknown`]) are kept
+    // and synced, but not listed, looked up, changed or exported here: this
+    // version doesn't know what their fields mean. (They're still purged
+    // from the trash in time, as another device put them there.)
+
+    /// The items this version knows the kind of.
+    fn known(&self) -> impl Iterator<Item = &Item> {
+        self.s.items.values().filter(|i| i.kind != ItemKind::Unknown)
+    }
+
+    /// An item to change, unless it's of an unknown kind.
+    fn known_mut(&mut self, id: &str) -> Result<&mut Item> {
+        self.s.items.get_mut(id).filter(|i| i.kind != ItemKind::Unknown).ok_or(Error::NotFound)
+    }
+
     /// Items not in the trash, by name.
     pub fn items(&self) -> Vec<&Item> {
-        let mut v: Vec<&Item> = self.s.items.values().filter(|i| i.deleted.is_none()).collect();
+        let mut v: Vec<&Item> = self.known().filter(|i| i.deleted.is_none()).collect();
         v.sort_by_cached_key(|i| (i.name.to_lowercase(), i.username.to_lowercase(), i.id.clone()));
         v
     }
 
     /// Items in the trash, most recently deleted first.
     pub fn trash(&self) -> Vec<&Item> {
-        let mut v: Vec<&Item> = self.s.items.values().filter(|i| i.deleted.is_some()).collect();
+        let mut v: Vec<&Item> = self.known().filter(|i| i.deleted.is_some()).collect();
         v.sort_by_key(|i| std::cmp::Reverse(i.deleted));
         v
     }
 
     pub fn get(&self, id: &str) -> Option<&Item> {
-        self.s.items.get(id)
+        self.s.items.get(id).filter(|i| i.kind != ItemKind::Unknown)
     }
 
     /// Folder names in use, sorted.
@@ -564,6 +579,9 @@ impl Vault {
 
     /// Adds an item; returns its id.
     pub fn add(&mut self, data: ItemData) -> Result<String> {
+        if data.kind == ItemKind::Unknown {
+            return Err(Error::invalid("this version doesn't know that kind of item"));
+        }
         if data.name.trim().is_empty() && data.uris.is_empty() && data.username.is_empty() {
             return Err(Error::invalid("give the item a name"));
         }
@@ -575,13 +593,16 @@ impl Vault {
 
     /// Changes an item; returns whether anything changed.
     pub fn update(&mut self, id: &str, data: ItemData) -> Result<bool> {
-        let item = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
+        if data.kind == ItemKind::Unknown {
+            return Err(Error::invalid("this version doesn't know that kind of item"));
+        }
+        let item = self.known_mut(id)?;
         Ok(item.apply(data, Utc::now()))
     }
 
     /// Moves an item to the trash.
     pub fn delete(&mut self, id: &str) -> Result<()> {
-        let item = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
+        let item = self.known_mut(id)?;
         if item.deleted.is_none() {
             let now = Utc::now();
             item.deleted = Some(now);
@@ -591,7 +612,7 @@ impl Vault {
     }
 
     pub fn restore(&mut self, id: &str) -> Result<()> {
-        let item = self.s.items.get_mut(id).ok_or(Error::NotFound)?;
+        let item = self.known_mut(id)?;
         if item.deleted.is_some() {
             item.deleted = None;
             item.modified = Utc::now();
@@ -602,7 +623,8 @@ impl Vault {
     /// Deletes an item for good (from every device, at the next sync,
     /// unless another device edits it first: an edit beats a delete).
     pub fn purge(&mut self, id: &str) -> Result<()> {
-        self.s.items.remove(id).ok_or(Error::NotFound)?;
+        self.known_mut(id)?;
+        self.s.items.remove(id);
         Ok(())
     }
 
@@ -618,7 +640,7 @@ impl Vault {
             .map(|(id, _)| id.clone())
             .collect();
         for id in old {
-            let _ = self.purge(&id);
+            self.s.items.remove(&id);
         }
     }
 
@@ -731,7 +753,7 @@ impl Vault {
             let mut candidate = Item::new(with_default_name(imported.data.clone()), now);
             candidate.history = imported.history.clone();
             candidate.passkeys = imported.passkeys.clone();
-            let same = self.s.items.values().filter(|i| i.deleted.is_none() && i.same_login(&candidate)).min_by_key(|i| (i.created, i.id.clone())).map(|i| i.id.clone());
+            let same = self.known().filter(|i| i.deleted.is_none() && i.same_login(&candidate)).min_by_key(|i| (i.created, i.id.clone())).map(|i| i.id.clone());
             if let Some(id) = same {
                 let item = self.s.items.get_mut(&id).expect("listed above");
                 let passkeys = item.passkeys.len();

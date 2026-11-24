@@ -509,6 +509,40 @@ mod tests {
         assert!(app.items().iter().any(|i| i.name == "Other"));
     }
 
+    /// An item of a kind from a newer version: not shown, changed or
+    /// exported here, but kept through saving, unlocking and syncing.
+    #[test]
+    fn unknown_kinds_are_kept_but_ignored() {
+        let (s3, mut a, mut b) = setup();
+        let raw = r#"{"id":"newer","kind":"passport","name":"Passport","number":"X123","created":"2026-01-01T00:00:00Z","modified":"2026-01-01T00:00:00Z"}"#;
+        let newer: Item = serde_json::from_str(raw).unwrap();
+        a.s.items.insert(newer.id.clone(), newer.clone());
+        let id = a.add(login("Example", "https://example.com", "me", "pw1")).unwrap();
+        let a = Vault::unlock(&a.save(), PW).unwrap();
+        assert_eq!(a.s.items["newer"], newer, "kept through saving and unlocking");
+        let mut a = a;
+        block_on(a.sync(&s3)).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+
+        // Ignored...
+        assert_eq!(b.items().iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
+        assert!(b.get("newer").is_none() && b.search("passport").is_empty() && b.trash().is_empty());
+        assert!(matches!(b.update("newer", ItemData::default()), Err(Error::NotFound)));
+        assert!(matches!(b.delete("newer"), Err(Error::NotFound)));
+        assert!(matches!(b.purge("newer"), Err(Error::NotFound)));
+        assert!(b.add(ItemData { kind: crate::ItemKind::Unknown, name: "x".into(), ..Default::default() }).is_err());
+        assert!(!b.export_json(PW).unwrap().contains("X123"));
+
+        // ...but kept: an edit made here syncs without losing it.
+        b.update(&id, login("Example", "https://example.com", "me", "pw2")).unwrap();
+        block_on(b.sync(&s3)).unwrap();
+        block_on(a.sync(&s3)).unwrap();
+        assert_eq!(a.s.items["newer"], newer);
+        assert_eq!(a.get(&id).unwrap().password, "pw2");
+        let stored = serde_json::to_value(&b.s.items["newer"]).unwrap();
+        assert_eq!((&stored["kind"], &stored["number"]), (&serde_json::Value::from("passport"), &serde_json::Value::from("X123")));
+    }
+
     #[test]
     fn two_devices_share_items() {
         let (s3, mut a, mut b) = setup();

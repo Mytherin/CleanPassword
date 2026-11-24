@@ -5,7 +5,7 @@
 //! older device editing an item doesn't drop them.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +30,11 @@ pub enum ItemKind {
     /// (see [`crate::ssh`]).
     #[serde(rename = "sshkey")]
     SshKey,
+    /// A kind from a newer version. The item is kept as it is (its kind in
+    /// [`Item::extra`], so it's saved back unchanged) but not shown, edited
+    /// or exported: this version doesn't know what its fields mean.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// One detail of a card, an identity or an SSH key: its key in Bitwarden's
@@ -196,10 +201,15 @@ pub struct Passkey {
 /// How many old passwords an item remembers.
 pub const HISTORY_LIMIT: usize = 20;
 
+// `remote = "Self"`: the derives make `Item::serialize` and
+// `Item::deserialize` functions, which the trait impls below wrap.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct Item {
     pub id: String,
-    #[serde(default)]
+    /// [`ItemKind::Unknown`] isn't written: the kind it was read as is in
+    /// `extra`.
+    #[serde(default, skip_serializing_if = "ItemKind::is_unknown")]
     pub kind: ItemKind,
     #[serde(default)]
     pub name: String,
@@ -237,6 +247,35 @@ pub struct Item {
     /// Fields of newer versions, kept as they were.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+impl Serialize for Item {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        Item::serialize(self, s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Item {
+    /// An item of a kind this version doesn't know (or that isn't a kind
+    /// at all) is read as [`ItemKind::Unknown`], with the kind it had kept
+    /// in `extra`.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Item, D::Error> {
+        let mut v = Map::deserialize(d)?;
+        let known = |k: &Value| matches!(serde_json::from_value::<ItemKind>(k.clone()), Ok(kind) if kind != ItemKind::Unknown);
+        let unknown = if v.get("kind").is_some_and(|k| !known(k)) { v.remove("kind") } else { None };
+        let mut item = Item::deserialize(Value::Object(v)).map_err(serde::de::Error::custom)?;
+        if let Some(kind) = unknown {
+            item.kind = ItemKind::Unknown;
+            item.extra.insert("kind".into(), kind);
+        }
+        Ok(item)
+    }
+}
+
+impl ItemKind {
+    pub fn is_unknown(&self) -> bool {
+        *self == ItemKind::Unknown
+    }
 }
 
 impl Item {
@@ -484,6 +523,33 @@ pub fn merge(base: Option<&Item>, local: &Item, remote: &Item) -> Item {
 
 #[cfg(test)]
 mod tests {
+
+    /// An item of a kind from a newer version is read, kept and written
+    /// back as it was; known kinds read as before.
+    #[test]
+    fn unknown_kinds_are_kept() {
+        let raw = r#"{"id":"x","kind":"passport","name":"Mine","number":"X123","created":"2026-01-01T00:00:00Z","modified":"2026-01-01T00:00:00Z"}"#;
+        let item: Item = serde_json::from_str(raw).unwrap();
+        assert_eq!(item.kind, ItemKind::Unknown);
+        assert_eq!(item.name, "Mine");
+        let back: Value = serde_json::to_value(&item).unwrap();
+        assert_eq!(back["kind"], "passport");
+        assert_eq!(back["number"], "X123");
+        assert_eq!(serde_json::to_string(&item).unwrap().matches("\"kind\"").count(), 1);
+        assert_eq!(serde_json::from_value::<Item>(back).unwrap(), item, "the same once read again");
+
+        // Not a kind at all: kept too.
+        let odd: Item = serde_json::from_str(&raw.replace(r#""passport""#, "5")).unwrap();
+        assert_eq!((odd.kind, &odd.extra["kind"]), (ItemKind::Unknown, &Value::from(5)));
+
+        // Known kinds, and none (a login), as before.
+        let key: Item = serde_json::from_str(&raw.replace("passport", "sshkey")).unwrap();
+        assert_eq!(key.kind, ItemKind::SshKey);
+        assert!(!key.extra.contains_key("kind"));
+        assert_eq!(serde_json::to_value(&key).unwrap()["kind"], "sshkey");
+        let login: Item = serde_json::from_str(&raw.replace(r#""kind":"passport","#, "")).unwrap();
+        assert_eq!(login.kind, ItemKind::Login);
+    }
     use super::*;
     use chrono::TimeZone;
 

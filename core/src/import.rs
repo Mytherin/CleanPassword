@@ -477,7 +477,8 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
                     ItemKind::Card => 3,
                     ItemKind::Identity => 4,
                     ItemKind::SshKey => 5,
-                    ItemKind::Note | ItemKind::Wifi => 2,
+                    // (Items of unknown kinds aren't exported.)
+                    ItemKind::Note | ItemKind::Wifi | ItemKind::Unknown => 2,
                 },
                 "reprompt": u32::from(i.reprompt),
                 "name": i.name,

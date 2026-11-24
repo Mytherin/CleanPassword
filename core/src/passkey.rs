@@ -359,7 +359,7 @@ impl Vault {
             return Err(Error::invalid("the client data hash must be 32 bytes"));
         }
         // Not from the trash (it isn't offered either).
-        let item = self.s.items.get_mut(item_id).filter(|i| i.deleted.is_none()).ok_or(Error::NotFound)?;
+        let item = self.s.items.get_mut(item_id).filter(|i| i.deleted.is_none() && i.kind != ItemKind::Unknown).ok_or(Error::NotFound)?;
         let p = item
             .passkeys
             .iter_mut()
@@ -384,7 +384,7 @@ impl Vault {
     /// Removes a passkey from an item (the site keeps its public key until
     /// removed there too).
     pub fn delete_passkey(&mut self, item_id: &str, credential_id: &str) -> Result<()> {
-        let item = self.s.items.get_mut(item_id).ok_or(Error::NotFound)?;
+        let item = self.s.items.get_mut(item_id).filter(|i| i.kind != ItemKind::Unknown).ok_or(Error::NotFound)?;
         let before = item.passkeys.len();
         item.passkeys.retain(|p| p.credential_id != credential_id);
         if item.passkeys.len() == before {

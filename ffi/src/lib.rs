@@ -354,6 +354,8 @@ fn item_record(i: &Item) -> VaultItem {
                 ItemKind::Card => Kind::Card,
                 ItemKind::Identity => Kind::Identity,
                 ItemKind::SshKey => Kind::SshKey,
+                // Never handed out: the vault keeps such items to itself.
+                ItemKind::Unknown => Kind::Note,
             },
             name: i.name.clone(),
             username: i.username.clone(),
