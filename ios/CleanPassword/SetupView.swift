@@ -23,7 +23,7 @@ struct SetupView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Your passwords live in an S3 bucket of your own, encrypted on this iPhone with your master password before they leave it.")
+                    Text("Your passwords live in an S3 bucket of your own, encrypted on this \(ThisDevice.name) with your master password before they leave it.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 Section("Bucket") {

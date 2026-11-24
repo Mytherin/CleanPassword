@@ -54,12 +54,14 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         model.mode = .codes
     }
 
-    /// "AutoFill → Passwords" from a field's text menu (iOS 18): any value
-    /// of any item, typed into the field.
+    #if !targetEnvironment(macCatalyst)
+    /// "AutoFill → Passwords" from a field's text menu (iOS 18, not on the
+    /// Mac): any value of any item, typed into the field.
     @available(iOS 18.0, *)
     override func prepareInterfaceForUserChoosingTextToInsert() {
         model.mode = .text
     }
+    #endif
 
     /// A suggestion above the keyboard was picked. The vault is locked
     /// whenever the extension starts, so this always needs the user (Face ID).
@@ -329,9 +331,11 @@ final class ExtensionModel: ObservableObject {
 
     /// Types the value into the field the menu was opened from.
     func insert(_ value: Value) {
+        #if !targetEnvironment(macCatalyst)
         guard #available(iOS 18.0, *) else { return }
         let text = value.codeOf.flatMap { session?.totp(id: $0)?.code } ?? value.text
         context()?.completeRequest(withTextToInsert: text, completionHandler: nil)
+        #endif
     }
 
     /// Saves the vault (merged with what the app saved meanwhile), so the
@@ -556,7 +560,7 @@ struct ExtensionView: View {
                 Button {
                     Task { await model.tryBiometrics() }
                 } label: {
-                    Label("Use \(BiometricKey.biometryName)", systemImage: BiometricKey.biometryName == "Touch ID" ? "touchid" : "faceid")
+                    Label("Use \(BiometricKey.biometryName)", systemImage: BiometricKey.symbol)
                 }
                 .disabled(model.busy)
             }
@@ -588,7 +592,7 @@ struct ExtensionView: View {
                     Image(systemName: "person.badge.key.fill").font(.system(size: 40)).foregroundStyle(.tint)
                     Text("Save a passkey for “\(model.registration?.userName ?? "")” on \(model.registration?.rpId ?? "")?")
                         .font(.headline).multilineTextAlignment(.center)
-                    Text("You'll sign in with Face ID instead of a password. The passkey is kept in CleanPassword, encrypted, on all your devices.")
+                    Text("You'll sign in with \(BiometricKey.biometryName) instead of a password. The passkey is kept in CleanPassword, encrypted, on all your devices.")
                         .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity)

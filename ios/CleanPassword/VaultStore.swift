@@ -94,7 +94,7 @@ final class VaultStore: ObservableObject {
     /// Unlocks with the PIN. Nil when unlocked, else what to tell the user
     /// (a wrong PIN, how many tries are left, or that PIN unlock is off).
     func unlockWithPin(_ pin: String) async -> String? {
-        guard let saved = SavedVault.load(), let id = vaultId else { return "There's no vault on this iPhone." }
+        guard let saved = SavedVault.load(), let id = vaultId else { return "There's no vault on this \(ThisDevice.name)." }
         let outcome = await Core.shared.detachedValue { PinKey.unlock(pin: pin, vaultId: id) }
         guard case .key(let key) = outcome else {
             objectWillChange.send()
@@ -209,7 +209,7 @@ final class VaultStore: ObservableObject {
         refreshPhase(unlocked: false)
     }
 
-    /// Removes the vault from this iPhone (not from S3).
+    /// Removes the vault from this device (not from S3).
     func forget() {
         editing = nil
         lockedDraft = nil
@@ -290,7 +290,7 @@ final class VaultStore: ObservableObject {
             } catch {
                 syncMessage = message(error)
                 // Another device changed the master password (and the vault
-                // key): the new password unlocks, and moves this iPhone to it.
+                // key): the new password unlocks, and moves this device to it.
                 if (try? await Core.shared.run({ $0.passwordChangedElsewhere() })) == true {
                     lock()
                     notice = "The master password was changed on another device. Unlock with the new one."

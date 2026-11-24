@@ -38,6 +38,12 @@ targets:
         com.apple.security.application-groups:
           - group.com.cleanpassword.app
         com.apple.developer.authentication-services.autofill-credential-provider: true
+        # The Mac (Mac Catalyst), where apps and extensions run sandboxed;
+        # iOS ignores these.
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        # A screenshot of a QR code, chosen to set up a verification code.
+        com.apple.security.files.user-selected.read-only: true
     # So automatic signing enables App Groups and AutoFill on the App ID.
     attributes:
       SystemCapabilities:
@@ -49,9 +55,12 @@ targets:
       - target: CleanPasswordAutoFill
         embed: true
         codeSign: true
+      # Safari on the Mac takes the Chrome extension's place there; this
+      # one is for the iPhone.
       - target: CleanPasswordSafari
         embed: true
         codeSign: true
+        platformFilter: iOS
       - framework: build/CleanPasswordCore.xcframework
         embed: false
         link: true
@@ -66,6 +75,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cleanpassword.app
         PRODUCT_NAME: CleanPassword
+        # Also a Mac app (Mac Catalyst), with the same ids as on the iPhone.
+        SUPPORTS_MACCATALYST: YES
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
         GENERATE_INFOPLIST_FILE: YES
         # What the generated keys go into: the otpauth:// URL scheme (a
         # verification-code QR code scanned with the Camera app opens the
@@ -116,6 +128,10 @@ targets:
         com.apple.security.application-groups:
           - group.com.cleanpassword.app
         com.apple.developer.authentication-services.autofill-credential-provider: true
+        # The Mac (Mac Catalyst), where apps and extensions run sandboxed;
+        # iOS ignores these.
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
     # So automatic signing enables App Groups and AutoFill on the App ID.
     attributes:
       SystemCapabilities:
@@ -138,6 +154,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cleanpassword.app.AutoFill
         PRODUCT_NAME: CleanPasswordAutoFill
+        SUPPORTS_MACCATALYST: YES
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
         TARGETED_DEVICE_FAMILY: "1,2"
         APPLICATION_EXTENSION_API_ONLY: YES
   # The Safari extension: CleanPassword's browser extension in Safari, built

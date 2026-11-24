@@ -12,10 +12,17 @@ struct CodeScannerView: View {
     @State private var photo: PhotosPickerItem?
     @State private var error: String?
     @State private var done = false
+    @State private var pickingFile = false
 
     var body: some View {
         NavigationStack {
             Group {
+                #if targetEnvironment(macCatalyst)
+                // No live scanner on the Mac: a screenshot of the QR code.
+                ContentUnavailableView(
+                    "Choose a Screenshot", systemImage: "qrcode.viewfinder",
+                    description: Text("Take a screenshot of the QR code (⇧⌘4), then choose it here. Or type the setup key in the editor."))
+                #else
                 if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
                     QRScanner { finish($0) }.ignoresSafeArea(edges: .bottom)
                 } else {
@@ -23,6 +30,7 @@ struct CodeScannerView: View {
                         "Camera Unavailable", systemImage: "camera",
                         description: Text("Choose a screenshot of the QR code instead, or type the setup key in the editor."))
                 }
+                #endif
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 10) {
@@ -30,6 +38,12 @@ struct CodeScannerView: View {
                         Text(error).font(.footnote).foregroundStyle(.white).padding(8)
                             .background(.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
                     }
+                    #if targetEnvironment(macCatalyst)
+                    Button { pickingFile = true } label: {
+                        Label("Choose Image File…", systemImage: "doc")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    #endif
                     PhotosPicker(selection: $photo, matching: .images) {
                         Label("Choose Photo or Screenshot…", systemImage: "photo")
                     }
@@ -44,6 +58,16 @@ struct CodeScannerView: View {
             }
             .onChange(of: photo) { _, item in
                 Task { await read(item) }
+            }
+            .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.image]) { result in
+                guard case .success(let url) = result else { return }
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                guard let data = try? Data(contentsOf: url) else {
+                    error = "That image can't be opened."
+                    return
+                }
+                read(data)
             }
         }
     }
@@ -62,7 +86,15 @@ struct CodeScannerView: View {
     /// The QR codes in a picked image.
     private func read(_ item: PhotosPickerItem?) async {
         guard let item else { return }
-        guard let data = try? await item.loadTransferable(type: Data.self), let image = CIImage(data: data) else {
+        guard let data = try? await item.loadTransferable(type: Data.self) else {
+            error = "That image can't be opened."
+            return
+        }
+        read(data)
+    }
+
+    private func read(_ data: Data) {
+        guard let image = CIImage(data: data) else {
             error = "That image can't be opened."
             return
         }
@@ -89,6 +121,7 @@ struct CodeScannerView: View {
     }
 }
 
+#if !targetEnvironment(macCatalyst)
 /// VisionKit's live scanner, for QR codes.
 private struct QRScanner: UIViewControllerRepresentable {
     let onCode: (String) -> Void
@@ -134,3 +167,4 @@ private struct QRScanner: UIViewControllerRepresentable {
         }
     }
 }
+#endif

@@ -190,6 +190,15 @@ open CleanPassword.xcodeproj
 
 **Turning on AutoFill.** In Settings → General → AutoFill & Passwords, turn on CleanPassword. The app's Settings has a shortcut.
 
+**On the Mac.** The same app runs on the Mac (Mac Catalyst), with its AutoFill extension, unlocked with Touch ID. In Xcode pick **My Mac (Mac Catalyst)**, or:
+
+```sh
+xcodebuild -project CleanPassword.xcodeproj -scheme CleanPassword -configuration Release \
+  -destination 'platform=macOS,variant=Mac Catalyst' -allowProvisioningUpdates DEVELOPMENT_TEAM=<team> build
+```
+
+Copy `CleanPassword.app` to /Applications, open it once, then turn it on in System Settings → General → AutoFill & Passwords. The Mac has no camera QR scanner (choose a screenshot of the code instead), no "AutoFill → Passwords" menu, and no Safari extension (use the browser extension in Chrome).
+
 **Tests:** ⌘U, or `xcodebuild test -project CleanPassword.xcodeproj -scheme CleanPassword -destination 'platform=iOS Simulator,name=iPhone 16'`.
 
 **CI.** `.github/workflows/ci.yml` runs three jobs:

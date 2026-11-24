@@ -135,7 +135,7 @@ private struct CodesList: View {
                         Spacer()
                         if let code, i.fields.reprompt {
                             // Shown only after Face ID: tap to copy.
-                            Image(systemName: "faceid").foregroundStyle(.secondary)
+                            Image(systemName: BiometricKey.symbol).foregroundStyle(.secondary)
                             CountdownRing(remaining: code.remaining, period: code.period)
                         } else if let code {
                             Text(spaced(code.code)).font(.title3.monospacedDigit()).foregroundStyle(.tint)

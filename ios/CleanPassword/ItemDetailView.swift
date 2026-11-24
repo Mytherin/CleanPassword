@@ -141,7 +141,7 @@ struct ItemDetailView: View {
                 } header: {
                     Text("Passkeys")
                 } footer: {
-                    Text("Signs you in to \(item.passkeys[0].rpId) with Face ID instead of a password.")
+                    Text("Signs you in to \(item.passkeys[0].rpId) with \(BiometricKey.biometryName) instead of a password.")
                 }
             }
             if !f.fields.isEmpty {

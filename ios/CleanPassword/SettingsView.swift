@@ -103,7 +103,7 @@ struct SettingsView: View {
                 Toggle("Show Website Icons", isOn: $siteIcons)
                     .onChange(of: siteIcons) { _, on in if !on { SiteIcons.clear() } }
             } footer: {
-                Text("Icons are fetched from each website itself (never with your passwords) and kept on this iPhone.")
+                Text("Icons are fetched from each website itself (never with your passwords) and kept on this \(ThisDevice.name).")
             }
             Section("Data") {
                 Button("Import…") { importing = true }
@@ -119,7 +119,7 @@ struct SettingsView: View {
                 Section { Text(error).foregroundStyle(.red) }
             }
             Section {
-                Button("Remove Vault from This iPhone…", role: .destructive) { confirmForget = true }
+                Button("Remove Vault from This \(ThisDevice.name)…", role: .destructive) { confirmForget = true }
             }
         }
         .navigationTitle("Settings")
@@ -164,7 +164,7 @@ struct SettingsView: View {
         .fileExporter(isPresented: Binding(get: { exportDoc != nil }, set: { if !$0 { exportDoc = nil } }), document: exportDoc, contentType: .json, defaultFilename: "cleanpassword-export.json") { _ in
             exportDoc = nil
         }
-        .confirmationDialog("Remove the vault from this iPhone?", isPresented: $confirmForget, titleVisibility: .visible) {
+        .confirmationDialog("Remove the vault from this \(ThisDevice.name)?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
                 dismiss()
                 store.forget()
@@ -288,7 +288,7 @@ struct ChangePasswordView: View {
     }
 }
 
-/// Choosing a PIN to unlock with on this iPhone (and in AutoFill), as
+/// Choosing a PIN to unlock with on this device (and in AutoFill), as
 /// Bitwarden offers: quicker than the master password where Face ID isn't
 /// wanted. Five wrong PINs turn it off.
 struct PinSetupView: View {
@@ -307,7 +307,7 @@ struct PinSetupView: View {
                 SecureField("PIN", text: $pin).keyboardType(.numberPad).textContentType(.oneTimeCode)
                 SecureField("PIN again", text: $again).keyboardType(.numberPad).textContentType(.oneTimeCode)
             } footer: {
-                Text("At least 6 digits. The PIN unlocks CleanPassword on this iPhone only; after \(PinKey.maxAttempts) wrong PINs it's turned off and your master password is needed. Someone with your unlocked phone and enough time could guess a short PIN: prefer \(BiometricKey.biometryName) where you can.")
+                Text("At least 6 digits. The PIN unlocks CleanPassword on this \(ThisDevice.name) only; after \(PinKey.maxAttempts) wrong PINs it's turned off and your master password is needed. Someone with your unlocked phone and enough time could guess a short PIN: prefer \(BiometricKey.biometryName) where you can.")
             }
             if !again.isEmpty && pin != again {
                 Section { Text("The PINs don't match.").foregroundStyle(.red) }

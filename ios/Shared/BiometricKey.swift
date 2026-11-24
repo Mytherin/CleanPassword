@@ -24,6 +24,15 @@ enum BiometricKey {
         }
     }
 
+    /// Its SF Symbol.
+    static var symbol: String {
+        switch biometryName {
+        case "Touch ID": return "touchid"
+        case "Optic ID": return "opticid"
+        default: return "faceid"
+        }
+    }
+
     private static func baseQuery(vaultId: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,

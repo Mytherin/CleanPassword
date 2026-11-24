@@ -46,7 +46,7 @@ struct UnlockView: View {
                 Button {
                     Task { _ = await store.unlockWithBiometrics() }
                 } label: {
-                    Label("Use \(BiometricKey.biometryName)", systemImage: "faceid")
+                    Label("Use \(BiometricKey.biometryName)", systemImage: BiometricKey.symbol)
                 }
             }
             if store.pinOn || usePin {
@@ -58,7 +58,7 @@ struct UnlockView: View {
                 }
             }
             Spacer()
-            Button("Remove Vault from This iPhone…", role: .destructive) { confirmForget = true }
+            Button("Remove Vault from This \(ThisDevice.name)…", role: .destructive) { confirmForget = true }
                 .font(.footnote)
         }
         .padding(24)
@@ -75,7 +75,7 @@ struct UnlockView: View {
                 Task { await offerBiometrics() }
             }
         }
-        .confirmationDialog("Remove the vault from this iPhone?", isPresented: $confirmForget, titleVisibility: .visible) {
+        .confirmationDialog("Remove the vault from this \(ThisDevice.name)?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Remove", role: .destructive) { store.forget() }
         } message: {
             Text("It stays in S3. Changes made here that haven't synced yet are lost.")
