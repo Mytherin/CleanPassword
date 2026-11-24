@@ -20,8 +20,8 @@ struct ItemEditView: View {
     @State private var f: ItemFields
     @State private var websites: [Site]
     @State private var custom: [Field]
-    /// A card's or identity's details, by label (the item fields they're
-    /// kept in).
+    /// A card's, identity's or SSH key's details, by label (the item fields
+    /// they're kept in).
     @State private var details: [String: String]
 
     struct Site: Identifiable {
@@ -63,6 +63,7 @@ struct ItemEditView: View {
         case .wifi: return "Wi-Fi network"
         case .card: return "card"
         case .identity: return "identity"
+        case .sshKey: return "SSH key"
         }
     }
 
@@ -125,6 +126,7 @@ struct ItemEditView: View {
                 Text("Wi-Fi Network").tag(Kind.wifi)
                 Text("Card").tag(Kind.card)
                 Text("Identity").tag(Kind.identity)
+                Text("SSH Key").tag(Kind.sshKey)
             }
             TextField(f.kind == .wifi ? "Network name" : "Name", text: $f.name)
                 .autocorrectionDisabled(f.kind == .wifi)
@@ -141,22 +143,31 @@ struct ItemEditView: View {
 
     @ViewBuilder
     private var detailsSection: some View {
-        if f.kind == .card || f.kind == .identity {
-            Section(f.kind == .card ? "Card" : "Identity") {
-                ForEach(itemDetails(kind: f.kind), id: \.label) { spec in
+        if let title = ItemDetailView.detailsTitle(f.kind) {
+            Section {
+                // Computed details (an SSH key's fingerprint) aren't typed:
+                // the core works them out when the item is saved.
+                ForEach(itemDetails(kind: f.kind).filter { !$0.computed }, id: \.label) { spec in
                     detailField(spec)
                 }
+            } header: {
+                Text(title)
+            } footer: {
+                if f.kind == .sshKey { Text("Paste the private key: its public key and fingerprint are filled in when you save.") }
             }
         }
     }
 
     private func detailField(_ spec: DetailSpec) -> some View {
         let text = Binding(get: { details[spec.label] ?? "" }, set: { details[spec.label] = $0 })
-        return TextField(spec.label, text: text)
+        // SSH keys span lines, and are typed as they are.
+        let key = f.kind == .sshKey
+        return TextField(spec.label, text: text, axis: key ? .vertical : .horizontal)
+            .lineLimit(key ? 1...6 : 1...1)
             .keyboardType(Self.keyboard(for: spec.label))
-            .textInputAutocapitalization(spec.label == "Email" ? .never : .words)
+            .textInputAutocapitalization(key || spec.label == "Email" ? .never : .words)
             .autocorrectionDisabled()
-            .font(spec.hidden ? .body.monospaced() : .body)
+            .font(key ? .caption.monospaced() : spec.hidden ? .body.monospaced() : .body)
     }
 
     private static func keyboard(for label: String) -> UIKeyboardType {
@@ -347,9 +358,10 @@ struct ItemEditView: View {
             let uri = site.uri.trimmingCharacters(in: .whitespaces)
             return uri.isEmpty ? nil : Website(uri: uri, matching: site.matching)
         }
-        // A card's or identity's details first, in their order, then the
-        // custom fields.
-        let detailFields = itemDetails(kind: f.kind).compactMap { spec -> CustomField? in
+        // A card's, identity's or SSH key's details first, in their order,
+        // then the custom fields (not the computed details: the core works
+        // them out again).
+        let detailFields = itemDetails(kind: f.kind).filter { !$0.computed }.compactMap { spec -> CustomField? in
             let value = (details[spec.label] ?? "").trimmingCharacters(in: .whitespaces)
             return value.isEmpty ? nil : CustomField(name: spec.label, value: value, hidden: spec.hidden)
         }

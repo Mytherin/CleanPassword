@@ -13,8 +13,8 @@ use serde_json::{Map, Value};
 pub enum ItemKind {
     #[default]
     Login,
-    /// A secure note (also what SSH keys and other types from other
-    /// password managers become, with their details as fields).
+    /// A secure note (also what types from other password managers that
+    /// have no kind here become, with their details as fields).
     Note,
     /// A Wi-Fi network, as in Apple's Passwords: `name` is the network's
     /// name and `password` its password. Never offered on websites, nor
@@ -25,19 +25,26 @@ pub enum ItemKind {
     /// An identity (name, address, contact, documents): fields named as in
     /// [`IDENTITY_DETAILS`].
     Identity,
+    /// An SSH key: fields named as in [`SSH_KEY_DETAILS`]. Its public key
+    /// and fingerprint are worked out from its private key when they can be
+    /// (see [`crate::ssh`]).
+    #[serde(rename = "sshkey")]
+    SshKey,
 }
 
-/// One detail of a card or an identity: its key in Bitwarden's format, the
-/// label of the item field it's kept in, and whether it's shown as dots.
+/// One detail of a card, an identity or an SSH key: its key in Bitwarden's
+/// format, the label of the item field it's kept in, whether it's shown as
+/// dots, and whether the core works it out (not typed in the editors).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Detail {
     pub key: &'static str,
     pub label: &'static str,
     pub hidden: bool,
+    pub computed: bool,
 }
 
 const fn detail(key: &'static str, label: &'static str, hidden: bool) -> Detail {
-    Detail { key, label, hidden }
+    Detail { key, label, hidden, computed: false }
 }
 
 pub const CARD_DETAILS: &[Detail] = &[
@@ -70,13 +77,20 @@ pub const IDENTITY_DETAILS: &[Detail] = &[
     detail("licenseNumber", "License number", true),
 ];
 
+pub const SSH_KEY_DETAILS: &[Detail] = &[
+    detail("privateKey", crate::ssh::PRIVATE_KEY, true),
+    detail("publicKey", crate::ssh::PUBLIC_KEY, false),
+    Detail { key: "keyFingerprint", label: crate::ssh::FINGERPRINT, hidden: false, computed: true },
+];
+
 impl ItemKind {
-    /// The details items of this kind have (none but for cards and
-    /// identities).
+    /// The details items of this kind have (none but for cards, identities
+    /// and SSH keys).
     pub fn details(self) -> &'static [Detail] {
         match self {
             ItemKind::Card => CARD_DETAILS,
             ItemKind::Identity => IDENTITY_DETAILS,
+            ItemKind::SshKey => SSH_KEY_DETAILS,
             _ => &[],
         }
     }
@@ -272,7 +286,10 @@ impl Item {
     /// Sets the editable parts; a changed password goes into the history.
     /// Returns whether anything changed.
     pub fn apply(&mut self, data: ItemData, now: DateTime<Utc>) -> bool {
-        let data = ItemData { name: data.name.trim().to_owned(), folder: normalize_folder(&data.folder), ..data };
+        let mut data = ItemData { name: data.name.trim().to_owned(), folder: normalize_folder(&data.folder), ..data };
+        if data.kind == ItemKind::SshKey {
+            data.fields = crate::ssh::complete(std::mem::take(&mut data.fields));
+        }
         if data == self.data() {
             return false;
         }

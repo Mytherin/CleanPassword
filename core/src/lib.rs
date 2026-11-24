@@ -23,6 +23,7 @@ pub mod matching;
 pub mod passkey;
 pub mod rules;
 pub mod s3;
+pub mod ssh;
 pub mod sync;
 pub mod totp;
 pub mod vault;

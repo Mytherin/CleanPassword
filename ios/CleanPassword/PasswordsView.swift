@@ -87,6 +87,8 @@ struct PasswordsView: View {
                     if cards > 0 { tile(.cards, count: cards) }
                     let identities = store.items.filter { $0.fields.kind == .identity }.count
                     if identities > 0 { tile(.identities, count: identities) }
+                    let sshKeys = store.items.filter { $0.fields.kind == .sshKey }.count
+                    if sshKeys > 0 { tile(.sshKeys, count: sshKeys) }
                     tile(.security, count: store.findings.filter { f in !HiddenRecommendations.isHidden(store.items.first { $0.id == f.id }, in: hidden) }.count)
                     tile(.deleted, count: store.trash.count)
                     tile(.favorites, count: store.items.filter { $0.fields.favorite }.count)

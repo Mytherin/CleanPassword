@@ -1,6 +1,6 @@
 // Types shared by the service worker, the content script and the pages.
 
-export type ItemKind = "login" | "note" | "wifi" | "card" | "identity";
+export type ItemKind = "login" | "note" | "wifi" | "card" | "identity" | "sshkey";
 export type UriMatch = "domain" | "host" | "startswith" | "exact" | "regex" | "never";
 
 export interface ItemUri {

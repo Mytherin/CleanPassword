@@ -16,6 +16,7 @@ struct ItemListView: View {
             case .wifi: sorted(store.items.filter { $0.fields.kind == .wifi })
             case .cards: sorted(store.items.filter { $0.fields.kind == .card })
             case .identities: sorted(store.items.filter { $0.fields.kind == .identity })
+            case .sshKeys: sorted(store.items.filter { $0.fields.kind == .sshKey })
             case .folder(let f): sorted(store.items.filter { $0.fields.folder == f })
             case .passkeys: sorted(store.items.filter { !$0.passkeys.isEmpty })
             case .favorites: sorted(store.items.filter(\.fields.favorite))
@@ -85,7 +86,7 @@ struct ItemListView: View {
 private extension Category {
     var sortable: Bool {
         switch self {
-        case .all, .folder, .passkeys, .favorites, .wifi, .cards, .identities: return true
+        case .all, .folder, .passkeys, .favorites, .wifi, .cards, .identities, .sshKeys: return true
         case .codes, .security, .deleted: return false
         }
     }

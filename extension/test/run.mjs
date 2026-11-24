@@ -177,6 +177,26 @@ try {
   const loginId = await ask("add", { data: { kind: "login", name: "Test site", username: "alice@example.com", password: "s3cret-Passw0rd", uris: [{ uri: WEB }], totp: "", notes: "", folder: "", favorite: false, fields: [] } });
   check("adds an item", typeof loginId === "string");
 
+  // An SSH key made in the editor: its public key and fingerprint are
+  // worked out from the private key.
+  {
+    const privateKey = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACCE/pc1EOIyYU1Sh8P6uh+HnKFVDyJhhXy7qixk8a4l7wAAAJhjSVCNY0lQ\njQAAAAtzc2gtZWQyNTUxOQAAACCE/pc1EOIyYU1Sh8P6uh+HnKFVDyJhhXy7qixk8a4l7w\nAAAEA/7ZuV0t1pgRX/N0GDN8F/GcKVNeLQMltowhAstQ4MEoT+lzUQ4jJhTVKHw/q6H4ec\noVUPImGFfLuqLGTxriXvAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==\n-----END OPENSSH PRIVATE KEY-----\n";
+    await popup.click('button[title="New item"]');
+    await popup.waitForSelector("form select");
+    await popup.select("form select", "sshkey");
+    await popup.type('input[placeholder="Name"]', "Laptop key");
+    await popup.$eval('textarea[placeholder="Private key"]', (t, v) => (t.value = v), privateKey);
+    const fingerprintInput = await popup.$('[placeholder="Fingerprint"]');
+    await popup.click("form button[type=submit]");
+    await popup.waitForFunction(() => document.querySelector("h1")?.textContent === "Laptop key");
+    const key = (await ask("items")).find((i) => i.name === "Laptop key");
+    const value = (name) => key?.fields.find((f) => f.name === name)?.value;
+    check("makes an SSH key in the editor", key?.kind === "sshkey" && value("Private key") === privateKey && !fingerprintInput, JSON.stringify(key?.fields));
+    check("with its public key and fingerprint",
+      value("Public key") === "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIT+lzUQ4jJhTVKHw/q6H4ecoVUPImGFfLuqLGTxriXv" && value("Fingerprint") === "SHA256:+/VgYdYRbJwZKgCRYaKZNh2IjC+SgEQZo+2XTL58vKM");
+    await ask("purge", { id: key.id });
+  }
+
   // Filling through the inline menu.
   const tab = await browser.newPage();
   await tab.goto(`${WEB}/login`);

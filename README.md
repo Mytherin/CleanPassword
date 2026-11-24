@@ -8,7 +8,7 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
 
 ## What it does
 
-- Logins (user name, password, websites, TOTP, notes, custom fields, folder, favorite) and secure notes. Cards, identities and SSH keys from Bitwarden become secure notes with their details as fields.
+- Logins (user name, password, websites, TOTP, notes, custom fields, folder, favorite), secure notes, Wi-Fi networks, cards, identities and SSH keys.
 - **Password generator:**
   - Apple-style `dobdyp-1ruzfa-hiFtoz` is the default.
   - Random (length and character classes) and EFF-wordlist passphrases are also available.
@@ -56,6 +56,7 @@ A password manager that looks and behaves like Apple's Passwords app, whose vaul
   - **All, Passkeys, Favorites and folders** sort by title (in letter sections), website, date created or date edited, and have their own search. Touch and hold an item to copy its user name, password or code, add it to Favorites, or delete it.
   - **Codes** shows each item's current verification code with a countdown ring; tap one to copy it.
   - **Cards and identities** (new item → Card or Identity) keep a payment card's or a person's details (number and security code hidden until tapped); their tiles appear once you have one. They import from and export to Bitwarden's card and identity types, and any detail can be typed into a field from AutoFill → Passwords.
+  - **SSH keys** (new item → SSH Key) keep a private key, hidden until tapped. Paste an OpenSSH private key (`-----BEGIN OPENSSH PRIVATE KEY-----`, with or without a passphrase) and its public key and `SHA256:` fingerprint are filled in when you save; for keys in older formats, paste the public key too. They import from and export to Bitwarden's SSH key type. There's no SSH agent yet: copy the key out to use it.
   - **Wi-Fi** keeps network names and passwords (new item → Wi-Fi Network); each shows a QR code another phone joins the network from. Networks are never offered on websites or audited, and export to Bitwarden JSON as notes that import back as networks.
   - **Security** lists **compromised passwords** (found in data leaks, checked with Have I Been Pwned by the first five characters of each password's SHA-1 only; it can be turned off in Settings), offers to merge duplicate logins, then lists reused passwords, then weak ones, logins saved for **http:// addresses**, and logins for sites that offer **two-factor authentication** where it isn't set up (from 2fa.directory's public list, downloaded whole). Any recommendation can be hidden until the item changes.
   - **Deleted** keeps items 30 days; swipe to recover or delete for good, or Recover All / Delete All.

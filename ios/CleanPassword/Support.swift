@@ -19,9 +19,10 @@ enum Category: Hashable {
     case codes
     /// Wi-Fi networks.
     case wifi
-    /// Payment cards and identities.
+    /// Payment cards, identities and SSH keys.
     case cards
     case identities
+    case sshKeys
     /// Weak and reused passwords.
     case security
     /// Recently Deleted.
@@ -38,6 +39,7 @@ enum Category: Hashable {
         case .wifi: return "Wi-Fi"
         case .cards: return "Cards"
         case .identities: return "Identities"
+        case .sshKeys: return "SSH Keys"
         case .security: return "Security"
         case .deleted: return "Deleted"
         case .favorites: return "Favorites"
@@ -53,6 +55,7 @@ enum Category: Hashable {
         case .wifi: return "wifi"
         case .cards: return "creditcard.fill"
         case .identities: return "person.text.rectangle.fill"
+        case .sshKeys: return "terminal.fill"
         case .security: return "exclamationmark.shield.fill"
         case .deleted: return "trash.fill"
         case .favorites: return "star.fill"
@@ -68,6 +71,7 @@ enum Category: Hashable {
         case .wifi: return .cyan
         case .cards: return .purple
         case .identities: return .brown
+        case .sshKeys: return .gray
         case .security: return .red
         case .deleted: return .orange
         case .favorites: return .yellow
@@ -118,6 +122,11 @@ struct ItemRow: View {
             let value = { (label: String) in item.fields.fields.first { $0.name == label }?.value ?? "" }
             let name = [value("First name"), value("Last name")].filter { !$0.isEmpty }.joined(separator: " ")
             return name.isEmpty ? (value("Email").isEmpty ? "Identity" : value("Email")) : name
+        }
+        if item.fields.kind == .sshKey {
+            // The key's type: ssh-ed25519, ssh-rsa…
+            let key = item.fields.fields.first { $0.name == "Public key" }?.value ?? ""
+            return key.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? "SSH key"
         }
         return item.fields.username.isEmpty ? (item.host ?? "") : item.fields.username
     }

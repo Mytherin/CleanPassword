@@ -145,7 +145,7 @@ struct ItemDetailView: View {
                 }
             }
             if !f.fields.isEmpty {
-                Section(f.kind == .card ? "Card" : f.kind == .identity ? "Identity" : "Fields") {
+                Section(Self.detailsTitle(f.kind) ?? "Fields") {
                     ForEach(Array(f.fields.enumerated()), id: \.offset) { n, c in
                         if c.hidden {
                             secretRow(c.name, c.value, shown: revealedFields.contains(n), key: "field\(n)", mono: false) { revealedFields.formSymmetricDifference([n]) }
@@ -255,6 +255,18 @@ struct ItemDetailView: View {
         case .wifi: return "Delete Network"
         case .card: return "Delete Card"
         case .identity: return "Delete Identity"
+        case .sshKey: return "Delete SSH Key"
+        }
+    }
+
+    /// The heading of a kind's details (and its fields); `nil` for kinds
+    /// without details.
+    static func detailsTitle(_ kind: Kind) -> String? {
+        switch kind {
+        case .card: return "Card"
+        case .identity: return "Identity"
+        case .sshKey: return "SSH Key"
+        case .login, .note, .wifi: return nil
         }
     }
 

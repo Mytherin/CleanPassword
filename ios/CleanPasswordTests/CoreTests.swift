@@ -156,6 +156,36 @@ final class CoreTests: XCTestCase {
         XCTAssertTrue(s.matches(url: "https://visa.com").isEmpty)
     }
 
+    /// SSH keys: the editors type the private and public keys; the core
+    /// fills in the public key and fingerprint from the private key.
+    func testSshKeys() throws {
+        let specs = itemDetails(kind: .sshKey)
+        XCTAssertEqual(specs.map(\.label), ["Private key", "Public key", "Fingerprint"])
+        XCTAssertEqual(specs.map(\.hidden), [true, false, false])
+        XCTAssertEqual(specs.map(\.computed), [false, false, true])
+
+        let s = try VaultSession.create(settings: settings, keys: keys, password: password)
+        var f = ItemFields.empty(kind: .sshKey)
+        f.name = "Laptop"
+        f.fields = [CustomField(name: "Private key", value: """
+        -----BEGIN OPENSSH PRIVATE KEY-----
+        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+        QyNTUxOQAAACCE/pc1EOIyYU1Sh8P6uh+HnKFVDyJhhXy7qixk8a4l7wAAAJhjSVCNY0lQ
+        jQAAAAtzc2gtZWQyNTUxOQAAACCE/pc1EOIyYU1Sh8P6uh+HnKFVDyJhhXy7qixk8a4l7w
+        AAAEA/7ZuV0t1pgRX/N0GDN8F/GcKVNeLQMltowhAstQ4MEoT+lzUQ4jJhTVKHw/q6H4ec
+        oVUPImGFfLuqLGTxriXvAAAAEHRlc3RAZXhhbXBsZS5jb20BAgMEBQ==
+        -----END OPENSSH PRIVATE KEY-----
+        """, hidden: true)]
+        let id = try s.add(fields: f)
+        let item = try XCTUnwrap(s.get(id: id))
+        XCTAssertEqual(item.fields.kind, .sshKey)
+        let value = { (label: String) in item.fields.fields.first { $0.name == label }?.value }
+        XCTAssertEqual(value("Public key"), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIT+lzUQ4jJhTVKHw/q6H4ecoVUPImGFfLuqLGTxriXv")
+        XCTAssertEqual(value("Fingerprint"), "SHA256:+/VgYdYRbJwZKgCRYaKZNh2IjC+SgEQZo+2XTL58vKM")
+        XCTAssertEqual(ItemRow(item: item).subtitle, "ssh-ed25519")
+        XCTAssertEqual(ItemDetailView.deleteTitle(.sshKey), "Delete SSH Key")
+    }
+
     func testUsernames() throws {
         let tagged = try generateUsername(recipe: .plusAddress(email: "me@example.com"))
         XCTAssertTrue(tagged.hasPrefix("me+") && tagged.hasSuffix("@example.com"))

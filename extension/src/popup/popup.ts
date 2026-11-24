@@ -328,16 +328,22 @@ function matchRow(m: Match): HTMLElement {
     monogram(m.name), h("span", { class: "text" }, h("div", { class: "title" }, m.name), h("div", { class: "sub" }, m.username || "No user name")), fill);
 }
 
-/// A card's or identity's details: the item fields they're kept in, and
-/// whether they're hidden (as the core's CARD_DETAILS / IDENTITY_DETAILS).
-const DETAILS: Partial<Record<Item["kind"], [string, boolean][]>> = {
+/// A card's, identity's or SSH key's details: the item fields they're kept
+/// in, whether they're hidden, and whether the core works them out instead
+/// of their being typed (as the core's CARD_DETAILS, IDENTITY_DETAILS and
+/// SSH_KEY_DETAILS).
+const DETAILS: Partial<Record<Item["kind"], [string, boolean, computed?: boolean][]>> = {
   card: [["Cardholder name", false], ["Brand", false], ["Number", true], ["Expiry month", false], ["Expiry year", false], ["Security code", true]],
   identity: [
     ["Title", false], ["First name", false], ["Middle name", false], ["Last name", false], ["Company", false], ["Email", false], ["Phone", false],
     ["Address line 1", false], ["Address line 2", false], ["Address line 3", false], ["City", false], ["State or province", false], ["Postal code", false],
     ["Country", false], ["User name", false], ["Social security number", true], ["Passport number", true], ["License number", true],
   ],
+  sshkey: [["Private key", true], ["Public key", false], ["Fingerprint", false, true]],
 };
+
+/// Details typed over several lines.
+const MULTILINE = new Set(["Private key", "Public key"]);
 
 function subtitle(i: Item): string {
   const field = (name: string) => i.fields.find((f) => f.name === name)?.value ?? "";
@@ -349,6 +355,7 @@ function subtitle(i: Item): string {
       return n.length >= 4 ? `Card •••• ${n.slice(-4)}` : "Card";
     }
     case "identity": return [field("First name"), field("Last name")].filter(Boolean).join(" ") || field("Email") || "Identity";
+    case "sshkey": return field("Public key").split(/\s+/)[0] || "SSH key";
     default: return i.username || hostOf(i.uris[0]?.uri) || "";
   }
 }
@@ -477,7 +484,7 @@ function edit(item: Item | null): void {
   const d: ItemData = item
     ? { kind: item.kind, name: item.name, username: item.username, password: item.password, uris: item.uris, totp: item.totp, notes: item.notes, folder: item.folder, favorite: item.favorite, fields: item.fields }
     : { kind: "login", name: "", username: "", password: "", uris: [], totp: "", notes: "", folder: "", favorite: false, fields: [] };
-  const kind = h("select", {}, h("option", { value: "login" }, "Login"), h("option", { value: "note" }, "Secure note"), h("option", { value: "wifi" }, "Wi-Fi network"), h("option", { value: "card" }, "Card"), h("option", { value: "identity" }, "Identity"));
+  const kind = h("select", {}, h("option", { value: "login" }, "Login"), h("option", { value: "note" }, "Secure note"), h("option", { value: "wifi" }, "Wi-Fi network"), h("option", { value: "card" }, "Card"), h("option", { value: "identity" }, "Identity"), h("option", { value: "sshkey" }, "SSH key"));
   kind.value = d.kind;
   const name = input({ value: d.name, placeholder: "Name" });
   const username = input({ value: d.username, placeholder: "User name or email" });
@@ -518,22 +525,27 @@ function edit(item: Item | null): void {
     username.value = await ask<string>("generate-username", { recipe });
   } }, "Generate");
   const loginOnly = [h("label", {}, "User name", h("div", { class: "inline" }, username, genUser)),h("label", {}, "Websites", uris, h("button", { class: "link small", type: "button", style: "align-self:flex-start", onclick: () => addUri() }, "Add website")), h("label", {}, "One-time code (TOTP)", totp)];
-  // A card's or identity's details, one input each (kept across kind changes).
-  const detailInputs = new Map<string, HTMLInputElement>();
+  // A card's, identity's or SSH key's details, one input each (kept across
+  // kind changes). Computed ones (an SSH key's fingerprint) aren't typed:
+  // the core works them out when the item is saved.
+  const detailInputs = new Map<string, HTMLInputElement | HTMLTextAreaElement>();
   const detailBox = h("div", { style: "display:flex; flex-direction:column; gap:8px" });
-  const detailSpecs = () => DETAILS[kind.value as Item["kind"]] ?? [];
+  const detailSpecs = () => (DETAILS[kind.value as Item["kind"]] ?? []).filter(([, , computed]) => !computed);
   const drawDetails = () => {
     detailBox.replaceChildren(...detailSpecs().map(([label, hidden]) => {
       let i = detailInputs.get(label);
       if (!i) {
-        i = input({ value: d.fields.find((f) => f.name === label)?.value ?? "", placeholder: label, type: hidden ? "password" : "text", autocomplete: "off" });
+        const value = d.fields.find((f) => f.name === label)?.value ?? "";
+        i = MULTILINE.has(label)
+          ? h("textarea", { placeholder: label, spellcheck: "false", autocomplete: "off", rows: "4", class: hidden ? "key masked" : "key" }, value)
+          : input({ value, placeholder: label, type: hidden ? "password" : "text", autocomplete: "off" });
         detailInputs.set(label, i);
       }
       return h("label", {}, label, i);
     }));
   };
   // Logins have everything; a Wi-Fi network only its name and password;
-  // cards and identities their details; a note none of these.
+  // cards, identities and SSH keys their details; a note none of these.
   const sync = () => {
     loginOnly.forEach((n) => (n.style.display = kind.value === "login" ? "" : "none"));
     passwordRow.style.display = kind.value === "login" || kind.value === "wifi" ? "" : "none";
@@ -566,9 +578,10 @@ function edit(item: Item | null): void {
       // networks have passwords.
       if (data.kind !== "login") Object.assign(data, { username: "", uris: [], totp: "" });
       if (data.kind !== "login" && data.kind !== "wifi") data.password = "";
-      // A card's or identity's details first, then the other fields.
+      // A card's, identity's or SSH key's details first, then the other
+      // fields (not the computed details: the core works them out again).
       const specs = detailSpecs();
-      const labels = new Set(specs.map(([label]) => label));
+      const labels = new Set((DETAILS[data.kind] ?? []).map(([label]) => label));
       const details = specs
         .map(([label, hidden]) => ({ name: label, value: (detailInputs.get(label)?.value ?? "").trim(), hidden }))
         .filter((f) => f.value);

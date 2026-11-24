@@ -228,11 +228,16 @@ fn convert(export: BwExport) -> Imported {
                     }
                 }
             }
-            3 | 4 => {
-                // Cards and identities: their details first, in the order
-                // the apps show them, then the custom fields.
-                d.kind = if bw.kind == 3 { ItemKind::Card } else { ItemKind::Identity };
-                let mut details = (if bw.kind == 3 { bw.card } else { bw.identity }).unwrap_or_default();
+            3..=5 => {
+                // Cards, identities and SSH keys: their details first, in
+                // the order the apps show them, then the custom fields.
+                let details;
+                (d.kind, details) = match bw.kind {
+                    3 => (ItemKind::Card, bw.card),
+                    4 => (ItemKind::Identity, bw.identity),
+                    _ => (ItemKind::SshKey, bw.ssh_key),
+                };
+                let mut details = details.unwrap_or_default();
                 let mut out: Vec<Field> = Vec::new();
                 for spec in d.kind.details() {
                     if let Some(value) = details.remove(spec.key).and_then(text) {
@@ -247,14 +252,6 @@ fn convert(export: BwExport) -> Imported {
                 }
                 out.append(&mut d.fields);
                 d.fields = out;
-            }
-            5 => {
-                d.kind = ItemKind::Note;
-                for (k, v) in bw.ssh_key.unwrap_or_default() {
-                    if let Some(value) = text(v) {
-                        d.fields.push(Field { name: label(&k), value, hidden: k == "privateKey" });
-                    }
-                }
             }
             _ => d.kind = ItemKind::Note,
         }
@@ -457,8 +454,8 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
     let items: Vec<Value> = items
         .iter()
         .map(|i| {
-            // A card's or identity's details go in Bitwarden's card or
-            // identity object, not its custom fields.
+            // A card's, identity's or SSH key's details go in Bitwarden's
+            // object for them, not its custom fields.
             let details = i.kind.details();
             let is_detail = |f: &Field| details.iter().any(|d| d.label == f.name);
             let mut fields: Vec<Value> = i
@@ -479,6 +476,7 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
                     ItemKind::Login => 1,
                     ItemKind::Card => 3,
                     ItemKind::Identity => 4,
+                    ItemKind::SshKey => 5,
                     ItemKind::Note | ItemKind::Wifi => 2,
                 },
                 "reprompt": u32::from(i.reprompt),
@@ -501,7 +499,11 @@ pub fn export_bitwarden_json(items: &[&Item]) -> String {
                     .iter()
                     .filter_map(|d| i.fields.iter().find(|f| f.name == d.label).map(|f| (d.key.to_string(), Value::from(f.value.clone()))))
                     .collect();
-                v[if i.kind == ItemKind::Card { "card" } else { "identity" }] = Value::Object(object);
+                v[match i.kind {
+                    ItemKind::Card => "card",
+                    ItemKind::Identity => "identity",
+                    _ => "sshKey",
+                }] = Value::Object(object);
             } else {
                 v["secureNote"] = json!({"type": 0});
             }
@@ -712,5 +714,37 @@ mod tests {
         let back = import_file(&exported, None).unwrap();
         assert_eq!(back.items[0].data, identity);
         assert_eq!(back.items[1].data, card);
+    }
+
+    /// SSH keys come in as their kind from Bitwarden (its fingerprint
+    /// worked out again from the public key) and go back out as Bitwarden's
+    /// type.
+    #[test]
+    fn ssh_keys_round_trip() {
+        use crate::ssh::tests::{KEY_FINGERPRINT, PRIVATE, PUBLIC};
+        let bw = json!({"encrypted": false, "items": [{
+            "type": 5, "name": "Laptop",
+            "sshKey": {"privateKey": PRIVATE, "publicKey": PUBLIC, "keyFingerprint": "SHA256:stale"},
+            "fields": [{"name": "Server", "value": "example.com", "type": 0}],
+        }]});
+        let r = import_file(&bw.to_string(), None).unwrap();
+        let data = &r.items[0].data;
+        assert_eq!(data.kind, ItemKind::SshKey);
+        let names: Vec<(&str, bool)> = data.fields.iter().map(|f| (f.name.as_str(), f.hidden)).collect();
+        assert_eq!(names, [("Private key", true), ("Public key", false), ("Fingerprint", false), ("Server", false)]);
+        // Saved, the fingerprint is the key's.
+        let item = Item::new(data.clone(), Utc::now());
+        assert_eq!(item.fields[2].value, KEY_FINGERPRINT);
+        assert_eq!(item.fields[1].value, PUBLIC, "the comment is kept");
+
+        let exported = export_bitwarden_json(&[&item]);
+        let v: Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(v["items"][0]["type"], 5);
+        assert_eq!(v["items"][0]["sshKey"]["privateKey"], PRIVATE);
+        assert_eq!(v["items"][0]["sshKey"]["publicKey"], PUBLIC);
+        assert_eq!(v["items"][0]["sshKey"]["keyFingerprint"], KEY_FINGERPRINT);
+        assert_eq!(v["items"][0]["fields"].as_array().unwrap().len(), 1, "only the custom field");
+        let back = import_file(&exported, None).unwrap();
+        assert_eq!(Item::new(back.items[0].data.clone(), Utc::now()).data(), item.data());
     }
 }

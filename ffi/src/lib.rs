@@ -105,6 +105,8 @@ pub enum Kind {
     Card,
     /// An identity (details as fields: see `item_details`).
     Identity,
+    /// An SSH key (details as fields: see `item_details`).
+    SshKey,
 }
 
 /// How a website is matched (Bitwarden's options).
@@ -325,6 +327,7 @@ impl From<ItemFields> for ItemData {
                 Kind::Wifi => ItemKind::Wifi,
                 Kind::Card => ItemKind::Card,
                 Kind::Identity => ItemKind::Identity,
+                Kind::SshKey => ItemKind::SshKey,
             },
             name: f.name,
             username: f.username,
@@ -350,6 +353,7 @@ fn item_record(i: &Item) -> VaultItem {
                 ItemKind::Wifi => Kind::Wifi,
                 ItemKind::Card => Kind::Card,
                 ItemKind::Identity => Kind::Identity,
+                ItemKind::SshKey => Kind::SshKey,
             },
             name: i.name.clone(),
             username: i.username.clone(),
@@ -701,23 +705,27 @@ pub fn locked_vault(saved: String) -> Option<LockedVault> {
 }
 
 
-/// One detail a card or identity has: kept in the item field named `label`.
+/// One detail a card, identity or SSH key has: kept in the item field named
+/// `label`. A `computed` one (an SSH key's fingerprint) is worked out when
+/// the item is saved: the editors show it, but don't let it be typed.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct DetailSpec {
     pub label: String,
     pub hidden: bool,
+    pub computed: bool,
 }
 
 /// The details items of a kind have, in the order they're shown (none but
-/// for cards and identities).
+/// for cards, identities and SSH keys).
 #[uniffi::export]
 pub fn item_details(kind: Kind) -> Vec<DetailSpec> {
     let kind = match kind {
         Kind::Card => ItemKind::Card,
         Kind::Identity => ItemKind::Identity,
+        Kind::SshKey => ItemKind::SshKey,
         _ => return Vec::new(),
     };
-    kind.details().iter().map(|d| DetailSpec { label: d.label.into(), hidden: d.hidden }).collect()
+    kind.details().iter().map(|d| DetailSpec { label: d.label.into(), hidden: d.hidden, computed: d.computed }).collect()
 }
 
 /// How a user name is made (see the core's `UsernameRecipe`).
