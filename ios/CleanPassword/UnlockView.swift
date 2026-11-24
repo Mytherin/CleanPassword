@@ -10,8 +10,8 @@ struct UnlockView: View {
     @FocusState private var focused: Bool
     @Environment(\.scenePhase) private var scenePhase
     @State private var wasInBackground = false
-    /// Unlocking with the PIN (when it's set up) rather than the master
-    /// password.
+    /// Unlocking with the PIN rather than the master password: the first
+    /// choice when it's set up.
     @State private var usePin = false
 
     var body: some View {
@@ -62,6 +62,7 @@ struct UnlockView: View {
                 .font(.footnote)
         }
         .padding(24)
+        .onAppear { usePin = store.pinOn }
         .task { await offerBiometrics() }
         // Locked on leaving the app (Lock After: Immediately), this screen
         // appears while the app is in the background, where Face ID can't

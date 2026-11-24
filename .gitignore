@@ -9,3 +9,4 @@
 /ios/*.xcodeproj
 /extension/test/dist-test
 /extension/test/build
+/ios/*/*.entitlements

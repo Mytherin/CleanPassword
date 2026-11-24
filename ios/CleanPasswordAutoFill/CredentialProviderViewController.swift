@@ -23,6 +23,15 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         host.didMove(toParent: self)
     }
 
+    private var askedBiometrics = false
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !askedBiometrics else { return }
+        askedBiometrics = true
+        Task { await model.tryBiometrics() }
+    }
+
     /// The list of logins for the sites the app or page asks about.
     override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
         model.services = serviceIdentifiers.map(\.identifier)
@@ -168,13 +177,31 @@ final class ExtensionModel: ObservableObject {
         context()?.completeExtensionConfigurationRequest()
     }
 
+    /// Face ID, once the sheet is on screen (the controller's viewDidAppear,
+    /// or the Use Face ID button): asked any earlier, while iOS is still
+    /// presenting the extension, it can fail without a prompt.
     func tryBiometrics() async {
         // Turning AutoFill on in Settings needs no unlocking.
-        guard mode != .configured else { return }
+        guard mode != .configured, !unlocked, !busy else { return }
         guard let saved = SavedVault.load(), let id = info?.vaultId, BiometricKey.exists(vaultId: id) else { return }
-        let key = await Task.detached { BiometricKey.read(vaultId: id, reason: "Unlock CleanPassword") }.value
-        guard let key, let s = try? VaultSession.unlockWithKey(saved: saved, key: key) else { return }
-        await opened(s, from: saved)
+        busy = true
+        defer { busy = false }
+        let result = await Task.detached { BiometricKey.readKey(vaultId: id, reason: "Unlock CleanPassword") }.value
+        switch result {
+        case .failure(let e):
+            // Cancelled (or the password chosen instead): no message.
+            if e.code != Int(errSecUserCanceled) {
+                error = "\(BiometricKey.biometryName) didn't unlock CleanPassword (error \(e.code)). Try again, or use your PIN or master password."
+            }
+        case .success(let key):
+            do {
+                let s = try await Task.detached { try VaultSession.unlockWithKey(saved: saved, key: key) }.value
+                error = nil
+                await opened(s, from: saved)
+            } catch {
+                self.error = message(error)
+            }
+        }
     }
 
     func unlock(password: String) async {
@@ -188,6 +215,8 @@ final class ExtensionModel: ObservableObject {
     }
 
     var pinOn: Bool { info.map { PinKey.exists(vaultId: $0.vaultId) } ?? false }
+
+    var biometricsOn: Bool { info.map { BiometricKey.exists(vaultId: $0.vaultId) } ?? false }
 
     /// Unlocks with the PIN set up in the app.
     func unlock(pin: String) async {
@@ -213,6 +242,9 @@ final class ExtensionModel: ObservableObject {
         session = s
         lastSaved = saved
         unlocked = true
+        // The suggestions above the keyboard, in case iOS has none yet (the
+        // app last registered them before AutoFill was turned on).
+        SuggestionStore.update(with: s.items())
         var seen = Set<String>()
         let siteMatches = services.flatMap { s.matches(url: $0) }.filter { seen.insert($0.id).inserted }
         switch mode {
@@ -479,7 +511,6 @@ struct ExtensionView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { model.cancel() } }
             }
         }
-        .task { await model.tryBiometrics() }
     }
 
     private var unlockTitle: String {
@@ -521,9 +552,23 @@ struct ExtensionView: View {
                     model.error = nil
                 }
             }
+            if model.biometricsOn && BiometricKey.isAvailable {
+                Button {
+                    Task { await model.tryBiometrics() }
+                } label: {
+                    Label("Use \(BiometricKey.biometryName)", systemImage: BiometricKey.biometryName == "Touch ID" ? "touchid" : "faceid")
+                }
+                .disabled(model.busy)
+            }
+            if !model.biometricsOn && BiometricKey.isAvailable {
+                Text("Turn on Unlock with \(BiometricKey.biometryName) in CleanPassword's Settings to skip the password here.")
+                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
             Spacer()
         }
         .padding(24)
+        // The PIN first, when it's set up.
+        .onAppear { usePin = model.pinOn }
     }
 
     private func unlock() async {
@@ -531,6 +576,8 @@ struct ExtensionView: View {
         if usePin { await model.unlock(pin: password) } else { await model.unlock(password: password) }
         password = ""
         busy = false
+        // Too many wrong PINs: back to the master password.
+        if usePin && !model.pinOn { usePin = false }
     }
 
     /// "Save a passkey for … on …?", as in Apple's Passwords.

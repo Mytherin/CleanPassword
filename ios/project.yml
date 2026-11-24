@@ -38,6 +38,13 @@ targets:
         com.apple.security.application-groups:
           - group.com.cleanpassword.app
         com.apple.developer.authentication-services.autofill-credential-provider: true
+    # So automatic signing enables App Groups and AutoFill on the App ID.
+    attributes:
+      SystemCapabilities:
+        com.apple.ApplicationGroups.iOS:
+          enabled: 1
+        com.apple.AutoFillCredentialProvider:
+          enabled: 1
     dependencies:
       - target: CleanPasswordAutoFill
         embed: true
@@ -109,6 +116,13 @@ targets:
         com.apple.security.application-groups:
           - group.com.cleanpassword.app
         com.apple.developer.authentication-services.autofill-credential-provider: true
+    # So automatic signing enables App Groups and AutoFill on the App ID.
+    attributes:
+      SystemCapabilities:
+        com.apple.ApplicationGroups.iOS:
+          enabled: 1
+        com.apple.AutoFillCredentialProvider:
+          enabled: 1
     dependencies:
       - target: RustCore
         embed: false

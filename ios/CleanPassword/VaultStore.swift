@@ -342,7 +342,10 @@ final class VaultStore: ObservableObject {
         } else if phase == .unlocked {
             Task {
                 // The AutoFill extension may have saved a passkey meanwhile.
-                if await Core.shared.reloadIfChangedOnDisk() { await reload() }
+                // Otherwise the suggestions are registered again anyway:
+                // iOS drops them while AutoFill is off, so turning it on in
+                // Settings and coming back fills the keyboard's list.
+                if await Core.shared.reloadIfChangedOnDisk() { await reload() } else { SuggestionStore.update(with: items) }
                 sync()
             }
         }

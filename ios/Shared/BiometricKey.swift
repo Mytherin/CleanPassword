@@ -48,14 +48,22 @@ enum BiometricKey {
 
     /// The key, after asking for Face ID; nil if cancelled or not set up.
     static func read(vaultId: String, reason: String) -> String? {
+        try? readKey(vaultId: vaultId, reason: reason).get()
+    }
+
+    /// The same, with the keychain's status when there's no key.
+    static func readKey(vaultId: String, reason: String) -> Result<String, NSError> {
         let ctx = LAContext()
         ctx.localizedReason = reason
         var q = baseQuery(vaultId: vaultId)
         q[kSecReturnData as String] = true
         q[kSecUseAuthenticationContext as String] = ctx
         var out: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let data = out as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(q as CFDictionary, &out)
+        guard status == errSecSuccess, let data = out as? Data, let key = String(data: data, encoding: .utf8) else {
+            return .failure(NSError(domain: NSOSStatusErrorDomain, code: Int(status)))
+        }
+        return .success(key)
     }
 
     /// Whether a key is stored, without asking for Face ID.
