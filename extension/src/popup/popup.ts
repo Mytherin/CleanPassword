@@ -243,8 +243,10 @@ async function home(): Promise<void> {
   const search = input({ class: "search", type: "search", placeholder: "Search", value: query });
   const list = h("div", {});
   const status = h("div", { class: "status" });
+  // The page in the current tab: a new item starts as a login for it.
+  let site: Site | null = null;
   const right = [
-    h("button", { class: "icon", title: "New item", "aria-label": "New item", onclick: () => edit(null) }, "+"),
+    h("button", { class: "icon", title: "New item", "aria-label": "New item", onclick: () => edit(null, site) }, "+"),
     h("button", { class: "icon", title: "Generator", "aria-label": "Password generator", onclick: () => void generator() }, "⚄"),
     h("button", { class: "icon", title: "Settings", "aria-label": "Settings", onclick: () => void settingsView() }, "⚙"),
     h("button", { class: "icon", title: "Lock", "aria-label": "Lock", onclick: async () => (await ask("lock"), await start()) }, "🔒"),
@@ -254,9 +256,10 @@ async function home(): Promise<void> {
   const draw = async () => {
     query = search.value;
     const [tab, items] = await Promise.all([
-      ask<{ host: string; matches: Match[]; pending: { kind: string; username: string } | null }>("tab-matches"),
+      ask<{ host: string; site: Site | null; matches: Match[]; pending: { kind: string; username: string } | null }>("tab-matches"),
       ask<Item[]>(query ? "search" : "items", { query }),
     ]);
+    site = tab.site;
     const nodes: Node[] = [];
     if (tab.pending && !query) {
       nodes.push(h("div", { class: "warn", style: "margin: 4px" },
@@ -480,10 +483,17 @@ async function detail(id: string): Promise<void> {
 
 // ---- Editing --------------------------------------------------------------------------------
 
-function edit(item: Item | null): void {
+/** A web page a new login can be for: its name and its website. */
+interface Site {
+  name: string;
+  uri: string;
+}
+
+/** Edits an item, or makes a new one: a login for `site` when it's given. */
+function edit(item: Item | null, site: Site | null = null): void {
   const d: ItemData = item
     ? { kind: item.kind, name: item.name, username: item.username, password: item.password, uris: item.uris, totp: item.totp, notes: item.notes, folder: item.folder, favorite: item.favorite, fields: item.fields }
-    : { kind: "login", name: "", username: "", password: "", uris: [], totp: "", notes: "", folder: "", favorite: false, fields: [] };
+    : { kind: "login", name: site?.name ?? "", username: "", password: "", uris: site ? [{ uri: site.uri, match: null }] : [], totp: "", notes: "", folder: "", favorite: false, fields: [] };
   const kind = h("select", {}, h("option", { value: "login" }, "Login"), h("option", { value: "note" }, "Secure note"), h("option", { value: "wifi" }, "Wi-Fi network"), h("option", { value: "card" }, "Card"), h("option", { value: "identity" }, "Identity"), h("option", { value: "sshkey" }, "SSH key"));
   kind.value = d.kind;
   const name = input({ value: d.name, placeholder: "Name" });
@@ -598,7 +608,8 @@ function edit(item: Item | null): void {
     }, save);
   });
   screen(item ? "Edit" : "New item", back(() => (item ? void detail(item.id) : void home())), [], form);
-  name.focus();
+  // For the current page the name and website are filled in: on to the user name.
+  (!item && site ? username : name).focus();
 }
 
 // ---- Generator ---------------------------------------------------------------------------------
