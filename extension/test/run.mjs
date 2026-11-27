@@ -335,6 +335,30 @@ try {
       const after = await ask("items");
       const bob = after.find((i) => i.id === saved?.id);
       check("a second sign-up doesn't replace the first account's password", bob?.password === v[0] && after.some((i) => i.password === v2 && i.id !== saved?.id), JSON.stringify(bob));
+
+      // Submitted still without a user name: asks which account it's for,
+      // a user name saved for the site filled in as a guess; emptied, the
+      // field turns red and Save does nothing.
+      await tab.keyboard.press("Escape");
+      await Promise.all([tab.waitForNavigation(), tab.click("button[type=submit]")]);
+      const which = await waitForFrame(tab, "prompt.html", 8000);
+      check("asks for the user name of a generated password saved without one", !!which);
+      if (which) {
+        await which.waitForSelector("input.user");
+        const guess = await which.$eval("input.user", (e) => e.value);
+        check("guesses a user name saved for the site", guess === "bob@example.com", guess);
+        await sleep(700);
+        const userField = await which.$("input.user");
+        await userField.evaluate((e) => (e.focus(), e.select()));
+        await userField.press("Backspace");
+        const red = await which.$eval("input.user", (e) => e.classList.contains("missing") && document.querySelector(".btn.primary").disabled);
+        check("an empty user name is shown in red, and can't be saved", red);
+        await which.type("input.user", "eve@example.com");
+        await which.click(".btn.primary");
+        await sleep(500);
+        const eve = (await ask("items")).find((i) => i.password === v2);
+        check("saves the user name typed in the prompt", eve?.username === "eve@example.com", JSON.stringify(eve?.username));
+      }
     } else check("a second sign-up doesn't replace the first account's password", false, "no menu");
   }
 
@@ -349,6 +373,8 @@ try {
   check("offers to save a new login after signing in", !!promptFrame);
   if (promptFrame) {
     await promptFrame.waitForSelector(".btn.primary");
+    const shown = await promptFrame.$eval("input.user", (e) => e.value).catch(() => null);
+    check("shows the user name from the form in the prompt", shown === "carol@example.com", String(shown));
     await sleep(700);
     await promptFrame.click(".btn.primary");
     await sleep(500);

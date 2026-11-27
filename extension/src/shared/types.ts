@@ -173,8 +173,15 @@ export interface PasskeyState {
 }
 
 export interface PromptState {
-  kind: "save" | "update";
+  /** "username": a generated password was saved without a user name. */
+  kind: "save" | "update" | "username";
   host: string;
+  /** The user name found in the form, else the updated login's. */
   username: string;
+  /** Whether `username` is the updated login's own (not editable). */
+  usernameFixed: boolean;
+  /** User names to offer, best first: those saved for the site, then the
+   *  email addresses used most in the vault. */
+  suggestions: string[];
   name: string;
 }

@@ -2,7 +2,7 @@
 // everything done with it. All vault work happens in the service worker;
 // this page asks it with messages.
 
-import type { Credentials, Item, ItemData, Match, Recipe, S3Config, Settings, SyncReport } from "../shared/types";
+import type { Credentials, Item, ItemData, Match, PromptState, Recipe, S3Config, Settings, SyncReport } from "../shared/types";
 import { ask, copy, CoreError, h, monogram } from "../shared/ui";
 
 const app = document.getElementById("app")!;
@@ -256,19 +256,12 @@ async function home(): Promise<void> {
   const draw = async () => {
     query = search.value;
     const [tab, items] = await Promise.all([
-      ask<{ host: string; site: Site | null; matches: Match[]; pending: { kind: string; username: string } | null }>("tab-matches"),
+      ask<{ host: string; site: Site | null; matches: Match[]; pending: PromptState | null }>("tab-matches"),
       ask<Item[]>(query ? "search" : "items", { query }),
     ]);
     site = tab.site;
     const nodes: Node[] = [];
-    if (tab.pending && !query) {
-      nodes.push(h("div", { class: "warn", style: "margin: 4px" },
-        `${tab.pending.kind === "update" ? "Update" : "Save"} the password for ${tab.host}${tab.pending.username ? ` (${tab.pending.username})` : ""}? `,
-        h("button", { class: "link", onclick: async () => (await ask("tab-answer-prompt", { answer: "save" }), draw()) }, tab.pending.kind === "update" ? "Update" : "Save"),
-        " · ",
-        h("button", { class: "link", onclick: async () => (await ask("tab-answer-prompt", { answer: "dismiss" }), draw()) }, "Not now"),
-      ));
-    }
+    if (tab.pending && !query) nodes.push(pendingBanner(tab.pending, draw));
     if (tab.matches.length && !query) {
       nodes.push(h("div", { class: "section" }, `For ${tab.host}`));
       for (const m of tab.matches) nodes.push(matchRow(m));
@@ -317,6 +310,44 @@ async function drawStatus(el: HTMLElement): Promise<void> {
       await ask("sync");
       await drawStatus(el);
     } }, "Sync now"),
+  );
+}
+
+/** A save waiting in the tab (the sign-in went on to another site), with
+ *  the user name to fill in or correct, as the prompt in the page. */
+function pendingBanner(p: PromptState, redraw: () => void): HTMLElement {
+  const update = p.kind === "update";
+  const label = p.kind === "username"
+    ? `The new password for ${p.host} has no user name. Which account is it for?`
+    : `${update ? "Update" : "Save"} the password for ${p.host}${p.usernameFixed ? ` (${p.username})` : ""}?`;
+  let field: HTMLInputElement | null = null;
+  let note: HTMLElement | null = null;
+  const send = async (answer: string) => {
+    await ask("tab-answer-prompt", { answer, ...(field ? { username: field.value } : {}) });
+    redraw();
+  };
+  const save = h("button", { class: "link", onclick: () => void send("save") }, update ? "Update" : "Save");
+  if (!p.usernameFixed) {
+    const listId = "pending-names";
+    field = input({ value: p.username || p.suggestions[0] || "", placeholder: "User name or email", list: listId, "aria-label": "User name" });
+    field.style.cssText = "width:100%;margin:6px 0 2px";
+    note = h("div", { class: "small" });
+    const refresh = () => {
+      const empty = !field!.value.trim();
+      field!.style.outline = empty ? "2px solid var(--danger)" : "";
+      note!.style.color = empty ? "var(--danger)" : "";
+      note!.textContent = empty ? "No user name: most sites need one with the password." : !p.username && field!.value === p.suggestions[0] ? "Not found on the page: check it's this account's." : "";
+      if (p.kind === "username") save.disabled = empty;
+    };
+    field.addEventListener("input", refresh);
+    refresh();
+    return h("div", { class: "warn", style: "margin: 4px" },
+      label, field, h("datalist", { id: listId }, ...p.suggestions.map((u) => h("option", { value: u }))), note,
+      h("div", {}, save, " · ", h("button", { class: "link", onclick: () => void send("dismiss") }, "Not now")),
+    );
+  }
+  return h("div", { class: "warn", style: "margin: 4px" },
+    `${label} `, save, " · ", h("button", { class: "link", onclick: () => void send("dismiss") }, "Not now"),
   );
 }
 
