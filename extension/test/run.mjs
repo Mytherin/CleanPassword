@@ -55,7 +55,10 @@ const pages = {
         el.addEventListener("input", () => { const now = desc.get.call(el); if (now !== tracked) { tracked = now; state[el.id] = now; } });
       }
     </script>`,
-  "/welcome": `<!doctype html><title>Welcome</title><p>Signed in.</p>`,
+  // Long enough to scroll, as most sites are: the save prompt in its corner
+  // must stay clear of the scrollbar (a frame partly under it is never
+  // reported entirely visible, and ignored every click).
+  "/welcome": `<!doctype html><title>Welcome</title><p>Signed in.</p><div style="height:3000px"></div>`,
   "/signup": `<!doctype html><title>Sign up</title><h1>Create your account</h1>
     <form action="/welcome" method="get"><input id="email" type="email" autocomplete="username" placeholder="Email">
     <input id="np" type="password" autocomplete="new-password" placeholder="New password">
@@ -128,6 +131,8 @@ const browser = await puppeteer.launch({
   // *.example.com: two hosts of one domain (www and signin.cloud), on the same server.
   args: ["--no-first-run", "--no-default-browser-check", "--window-size=1200,900", "--host-resolver-rules=MAP *.example.com 127.0.0.1"],
   defaultViewport: { width: 1200, height: 900 },
+  // Scrollbars as on Windows and Linux (puppeteer hides them by default).
+  ignoreDefaultArgs: ["--hide-scrollbars"],
 });
 
 try {

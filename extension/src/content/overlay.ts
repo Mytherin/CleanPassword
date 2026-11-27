@@ -40,6 +40,16 @@ export function pageLooksHostile(anchor: Element | null): boolean {
   return false;
 }
 
+/** The window's size less its scrollbars: what's under a scrollbar isn't
+ *  visible, and a frame running under one (innerWidth counts it: 17px on
+ *  Windows) is never reported entirely visible, so it ignores every click. */
+function viewport(): { width: number; height: number } {
+  const e = document.compatMode === "BackCompat" ? document.body : document.documentElement;
+  const width = e?.clientWidth || window.innerWidth;
+  const height = e?.clientHeight || window.innerHeight;
+  return { width: Math.min(width, window.innerWidth), height: Math.min(height, window.innerHeight) };
+}
+
 export class Overlay {
   private host: HTMLElement | null = null;
   private frame: HTMLIFrameElement | null = null;
@@ -205,21 +215,22 @@ export class Overlay {
 
   private position(): void {
     if (!this.host) return;
+    const view = viewport();
     let room: number;
     if (this.placement === "corner" || !this.anchor) {
       this.width = 340;
       this.top = 12;
-      this.left = Math.max(4, window.innerWidth - this.width - 12);
-      room = window.innerHeight - 24;
+      this.left = Math.max(4, view.width - this.width - 12);
+      room = view.height - 24;
     } else {
       const r = this.anchor.getBoundingClientRect();
       // Whole pixels: a frame of fractional width shows its page a pixel
       // narrower than that page lays out, and Chrome then reports the menu
       // as not entirely visible, ignoring every click (as on AWS's sign-in).
       this.width = Math.round(Math.min(Math.max(r.width, 280), 360));
-      this.left = Math.max(4, Math.min(r.left, window.innerWidth - this.width - 4));
+      this.left = Math.max(4, Math.min(r.left, view.width - this.width - 4));
       // Below the field, or above it when there's more room there.
-      const below = Math.floor(window.innerHeight - r.bottom - 12);
+      const below = Math.floor(view.height - r.bottom - 12);
       const above = Math.floor(r.top - 12);
       const up = this.wanted > below && above > below;
       room = up ? above : below;
@@ -240,9 +251,10 @@ export class Overlay {
     if (!host) return;
     if (!host.isConnected || (this.anchor && !this.anchor.isConnected)) return this.close();
     if (pageLooksHostile(this.anchor)) return this.close();
+    const view = viewport();
     if (this.anchor) {
       const r = this.anchor.getBoundingClientRect();
-      if (r.bottom < 0 || r.top > window.innerHeight) return this.close();
+      if (r.bottom < 0 || r.top > view.height) return this.close();
     }
     this.position();
     // An element put in the top layer after ours could cover it: re-show ours
@@ -269,7 +281,7 @@ export class Overlay {
       [r.right - 6, r.bottom - 6],
     ];
     for (const [x, y] of pts) {
-      if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) continue;
+      if (x < 0 || y < 0 || x > view.width || y > view.height) continue;
       const hit = document.elementFromPoint(x, y);
       if (hit && hit !== host) return this.close();
     }

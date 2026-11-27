@@ -15,8 +15,10 @@ function close(): void {
 function answer(e: Event, a: string): void {
   // As the inline menu: only a click on the prompt fully visible for a
   // moment (a page could otherwise trick the user into saving a password it
-  // chose over the one saved).
-  if (!safeToAct(e)) return;
+  // chose over the one saved). "Not now" changes nothing, so it always
+  // works: the prompt can be closed even should Chrome never report it
+  // visible.
+  if (!e.isTrusted || (a !== "dismiss" && !safeToAct(e))) return;
   void ask("prompt-answer", { token, answer: a }).finally(close);
 }
 
