@@ -109,7 +109,8 @@ export class Overlay {
       iframe{display:block;border:0;width:100%;height:100%;color-scheme:normal;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.28)}`;
     const frame = document.createElement("iframe");
     frame.src = chrome.runtime.getURL(this.page) + "#" + token;
-    frame.setAttribute("allow", "");
+    // Nothing of the page's; only the menu may copy (its suggested password).
+    frame.setAttribute("allow", this.page === "menu.html" ? "clipboard-write" : "");
     frame.title = "CleanPassword";
     shadow.append(style, frame);
     // A field in a modal dialog: everything outside that dialog is inert,

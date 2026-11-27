@@ -275,9 +275,19 @@ try {
   if (gen) {
     await gen.waitForSelector(".row.suggest");
     await sleep(700);
+    // Copying it first: the menu stays open, the password on the clipboard.
+    const suggested = await gen.$eval(".row.suggest .sub", (e) => e.textContent);
+    await browser.defaultBrowserContext().overridePermissions(WEB, ["clipboard-read", "clipboard-write", "clipboard-sanitized-write"]);
+    await gen.click(".suggest-wrap .copy");
+    await sleep(300);
+    const label = await gen.$eval(".suggest-wrap .copy", (e) => e.textContent);
+    await tab.bringToFront();
+    const copied = await tab.evaluate(() => navigator.clipboard.readText()).catch((e) => `error: ${e.message}`);
+    check("copies the suggested password from the menu", copied === suggested && label === "Copied", JSON.stringify({ copied, suggested, label }));
     await gen.click(".row.suggest");
     await sleep(800);
     const v = await tab.evaluate(() => [document.getElementById("np").value, document.getElementById("cp").value]);
+    check("and fills the password it copied", v[0] === suggested, JSON.stringify({ v, suggested }));
     check("fills it into both password fields", v[0].length >= 16 && v[0] === v[1], JSON.stringify(v));
     const items = await ask("items");
     const saved = items.find((i) => i.password === v[0]);

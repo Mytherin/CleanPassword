@@ -208,6 +208,9 @@ struct ItemEditView: View {
                 showPassword = true
             } label: { Image(systemName: "dice") }.buttonStyle(.borderless)
                 .accessibilityLabel("Generate Password")
+            Button { copySecret(f.password) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                .disabled(f.password.isEmpty)
+                .accessibilityLabel("Copy Password")
         }
     }
 

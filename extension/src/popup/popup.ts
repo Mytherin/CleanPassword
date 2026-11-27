@@ -499,6 +499,8 @@ function edit(item: Item | null): void {
     password.type = "text";
     void meter.update(password.value);
   } }, "Generate");
+  const copyPassword = copyButton(() => password.value);
+  copyPassword.type = "button";
   const uris = h("div", { style: "display:flex; flex-direction:column; gap:6px" });
   const addUri = (v = "") => {
     const i = input({ value: v, placeholder: "https://example.com" });
@@ -516,7 +518,7 @@ function edit(item: Item | null): void {
   const notes = h("textarea", {}, d.notes);
   const err = errorBox();
   const save = h("button", { class: "btn primary", type: "submit" }, "Save");
-  const passwordRow = h("label", {}, "Password", h("div", { class: "inline" }, password, reveal, gen), meter.el);
+  const passwordRow = h("label", {}, "Password", h("div", { class: "inline" }, password, reveal, gen, copyPassword), meter.el);
   // A random user name: a word, or a tagged address when an email is typed
   // there (me@example.com → me+k3x9q2va@example.com).
   const genUser = h("button", { class: "btn small", type: "button", title: "Generate a user name", onclick: async () => {
