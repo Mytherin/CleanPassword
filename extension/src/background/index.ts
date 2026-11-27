@@ -957,7 +957,14 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "tab-matches": {
       const tab = await activeTab(sender);
       const url = tab?.url ?? "";
-      return { host: hostOf(url), matches: /^https?:/.test(url) ? unique(s, s.matches(url) as Match[], tab?.id ? tabLogin(tab.id, url) : null) : [], pending: pendingSave(tab?.id) ?? null };
+      const web = /^https?:/.test(url);
+      return {
+        host: hostOf(url),
+        // What a new login for this page starts with, named as a saved one is.
+        site: web ? { name: core.registrableDomain(hostOf(url)), uri: originOf(url) } : null,
+        matches: web ? unique(s, s.matches(url) as Match[], tab?.id ? tabLogin(tab.id, url) : null) : [],
+        pending: pendingSave(tab?.id) ?? null,
+      };
     }
     case "tab-fill": {
       // From the popup (a user gesture): fill the page's focused (or first)

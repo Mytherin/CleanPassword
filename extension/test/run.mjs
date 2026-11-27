@@ -232,6 +232,28 @@ try {
   } else check("offers the same login saved three times once, under its shortest name", false);
   for (const id of dupIds) await ask("purge", { id });
 
+  // A new item from the popup starts as a login for the page in the tab:
+  // the popup as a window of its own, the web page the browser window's tab.
+  {
+    await tab.bringToFront();
+    const opened = browser.waitForTarget((t) => t.url().includes("popup.html?window=1"), { timeout: 10000 });
+    await popup.evaluate(() => chrome.windows.create({ url: chrome.runtime.getURL("popup.html?window=1"), type: "popup", width: 380, height: 600 }));
+    const win = await (await opened).page();
+    await win.waitForSelector("input.search", { timeout: 10000 });
+    await sleep(500);
+    await win.click('button[title="New item"]');
+    await win.waitForSelector("form select");
+    const form = await win.evaluate(() => ({
+      kind: document.querySelector("form select").value,
+      name: document.querySelector('input[placeholder="Name"]').value,
+      uris: [...document.querySelectorAll('input[placeholder="https://example.com"]')].map((i) => i.value),
+      focused: document.activeElement?.getAttribute("placeholder"),
+    }));
+    check("a new item is a login for the current page", form.kind === "login" && form.name === "127.0.0.1" && form.uris.length === 1 && form.uris[0] === WEB, JSON.stringify(form));
+    check("with the user name next to type", form.focused === "User name or email", form.focused);
+    await win.close();
+  }
+
   // Chrome stops the extension's worker while a menu is open: the menu
   // still fills (it doesn't say "expired").
   await tab.goto(`${WEB}/login`);
