@@ -9,6 +9,11 @@
   #root { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
   .head { display: flex; gap: 10px; align-items: center; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+  .userbox { display: flex; flex-direction: column; gap: 4px; }
+  .user { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .user:focus { outline: none; border-color: var(--accent); }
+  .user.missing { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger); }
+  .note.bad { color: var(--danger); font-weight: 500; }
 </style>
 </head>
 <body>

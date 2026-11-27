@@ -366,7 +366,9 @@ const generatedIn = new Map<number, { itemId: string; password: string; at: numb
 
 interface PendingSave {
   token: string;
-  kind: "save" | "update";
+  /** "username": asks only for the user name of a login saved without one
+   *  (a generated password, the form having none). */
+  kind: "save" | "update" | "username";
   itemId: string | null;
   url: string;
   username: string;
@@ -415,6 +417,12 @@ async function submitted(frame: FrameRef, s: Submission): Promise<void> {
       session.update(item.id, { ...item, username } as ItemData);
       await persist();
       scheduleSync();
+    } else if (item && !item.username) {
+      // Saved without a user name, and the form has none either: a password
+      // is rarely any use without one, so ask for it.
+      generatedIn.delete(frame.tabId);
+      pendingSaves.set(frame.tabId, { embedded: false, token: token(), kind: "username", itemId: item.id, url: frame.url, username: "", password, at: Date.now() });
+      setTimeout(() => void showPrompt(frame.tabId), 1500);
     }
     return;
   }
@@ -472,7 +480,46 @@ async function showPrompt(tabId: number): Promise<void> {
   await chrome.tabs.sendMessage(tabId, { type: "show-prompt", token: p.token }, { frameId: 0 }).catch(() => null);
 }
 
-async function answerPrompt(p: PendingSave, tabId: number, answer: string): Promise<void> {
+/** User names to offer for a login on `url`, best first: those saved for
+ *  the site, then the email addresses used most across the vault. */
+function usernameSuggestions(s: core.Session, url: string): string[] {
+  const out = new Map<string, string>();
+  const add = (u: string) => {
+    const t = u.trim();
+    if (t && !out.has(t.toLowerCase())) out.set(t.toLowerCase(), t);
+  };
+  for (const m of s.siteLogins(url) as Match[]) add(m.username);
+  const emails = new Map<string, { email: string; n: number }>();
+  for (const i of s.items() as Item[]) {
+    const u = i.username?.trim() ?? "";
+    if (i.kind !== "login" || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(u)) continue;
+    const e = emails.get(u.toLowerCase());
+    emails.set(u.toLowerCase(), { email: e?.email ?? u, n: (e?.n ?? 0) + 1 });
+  }
+  for (const e of [...emails.values()].sort((a, b) => b.n - a.n)) add(e.email);
+  return [...out.values()].slice(0, 8);
+}
+
+/** What the save prompt (and the popup) shows for a pending save. */
+function promptState(s: core.Session, p: PendingSave): PromptState {
+  const item = p.itemId ? (s.get(p.itemId) as Item | undefined) : undefined;
+  const own = p.kind === "update" ? item?.username ?? "" : "";
+  return {
+    kind: p.kind,
+    host: hostOf(p.url),
+    username: own || p.username,
+    usernameFixed: !!own,
+    suggestions: own ? [] : usernameSuggestions(s, p.url),
+    name: item?.name ?? core.registrableDomain(hostOf(p.url)),
+  };
+}
+
+function pendingPrompt(s: core.Session, tabId: number | undefined): PromptState | null {
+  const p = pendingSave(tabId);
+  return p ? promptState(s, p) : null;
+}
+
+async function answerPrompt(p: PendingSave, tabId: number, answer: string, typed: string | null): Promise<void> {
   pendingSaves.delete(tabId);
   chrome.action.setBadgeText({ tabId, text: "" });
   if (!session) return;
@@ -483,12 +530,23 @@ async function answerPrompt(p: PendingSave, tabId: number, answer: string): Prom
     return;
   }
   if (answer !== "save") return;
+  // The user name as the prompt showed it (edited or confirmed there).
+  const username = typed !== null ? typed.trim().slice(0, 500) : p.username;
+  if (p.kind === "username") {
+    const item = p.itemId ? (session.get(p.itemId) as Item | undefined) : undefined;
+    if (!item || item.username || !username) return;
+    session.update(item.id, { ...item, username } as ItemData);
+    await persist();
+    scheduleSync();
+    return;
+  }
   const item = p.kind === "update" && p.itemId ? (session.get(p.itemId) as Item | undefined) : undefined;
   if (item) {
-    // (Deleted meanwhile: saved as a new login instead.)
-    session.update(item.id, { ...item, password: p.password, username: item.username || p.username } as ItemData);
+    // (Deleted meanwhile: saved as a new login instead.) A login's own user
+    // name isn't changed from here, only filled in when it has none.
+    session.update(item.id, { ...item, password: p.password, username: item.username || username } as ItemData);
   } else {
-    session.add({ kind: "login", name: core.registrableDomain(hostOf(p.url)), username: p.username, password: p.password, uris: [{ uri: originOf(p.url) }], totp: "", notes: "", folder: "", favorite: false, fields: [] });
+    session.add({ kind: "login", name: core.registrableDomain(hostOf(p.url)), username, password: p.password, uris: [{ uri: originOf(p.url) }], totp: "", notes: "", folder: "", favorite: false, fields: [] });
   }
   await persist();
   scheduleSync();
@@ -957,7 +1015,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "tab-matches": {
       const tab = await activeTab(sender);
       const url = tab?.url ?? "";
-      return { host: hostOf(url), matches: /^https?:/.test(url) ? unique(s, s.matches(url) as Match[], tab?.id ? tabLogin(tab.id, url) : null) : [], pending: pendingSave(tab?.id) ?? null };
+      return { host: hostOf(url), matches: /^https?:/.test(url) ? unique(s, s.matches(url) as Match[], tab?.id ? tabLogin(tab.id, url) : null) : [], pending: pendingPrompt(s, tab?.id) };
     }
     case "tab-fill": {
       // From the popup (a user gesture): fill the page's focused (or first)
@@ -977,7 +1035,7 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "tab-answer-prompt": {
       const tab = await activeTab(sender);
       const p = pendingSave(tab?.id);
-      if (p && tab?.id) await answerPrompt(p, tab.id, String(msg.answer));
+      if (p && tab?.id) await answerPrompt(p, tab.id, String(msg.answer), typeof msg.username === "string" ? msg.username : null);
       return null;
     }
 
@@ -1048,15 +1106,13 @@ async function fromExtension(msg: Msg, sender: chrome.runtime.MessageSender): Pr
     case "prompt-state": {
       const p = pendingSave(sender.tab?.id);
       if (!p || p.token !== msg.token) return null;
-      const item = p.itemId ? (s.get(p.itemId) as Item | undefined) : undefined;
-      const state: PromptState = { kind: p.kind, host: hostOf(p.url), username: p.username, name: item?.name ?? core.registrableDomain(hostOf(p.url)) };
-      return state;
+      return promptState(s, p);
     }
     case "prompt-answer": {
       const tabId = sender.tab?.id;
       const p = pendingSave(tabId);
       if (!p || !tabId || p.token !== msg.token) return null;
-      await answerPrompt(p, tabId, String(msg.answer));
+      await answerPrompt(p, tabId, String(msg.answer), typeof msg.username === "string" ? msg.username : null);
       return null;
     }
   }
