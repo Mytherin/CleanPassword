@@ -73,6 +73,31 @@ function row(icon: Node, title: string, sub: string, onAct: (e: Event) => void, 
   return b;
 }
 
+// Copying the suggested password, to paste it somewhere else first (or into
+// a field the menu can't fill). The menu stays open.
+const copyButton = h("button", { class: "btn small copy", title: "Copy the suggested password", "aria-label": "Copy the suggested password" }, "Copy");
+copyButton.addEventListener("click", (e) => void copySuggestion(e));
+
+async function copySuggestion(e: Event): Promise<void> {
+  const text = state?.suggestion;
+  if (!text || !safeToAct(e)) return;
+  let ok = true;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Without the Clipboard API (a page whose own policy keeps it from its
+    // frames): the older way, from a field of the menu's own.
+    const t = h("textarea", { style: "position:fixed; opacity:0" }) as HTMLTextAreaElement;
+    t.value = text;
+    document.body.append(t);
+    t.select();
+    ok = document.execCommand("copy");
+    t.remove();
+  }
+  copyButton.textContent = ok ? "Copied" : "Can't copy";
+  setTimeout(() => (copyButton.textContent = "Copy"), 1500);
+}
+
 function matchRow(m: Match): HTMLButtonElement {
   const otp = state!.role === "otp";
   const sub =
@@ -108,8 +133,9 @@ function render(): void {
   } else {
     if (s.embeddedIn) root.append(h("div", { class: "warn", style: "margin: 4px 8px" }, `This form is from ${s.host}, inside a page from ${s.embeddedIn}.`));
     if (s.suggestion) {
-      root.append(row(h("span", { class: "mono", style: "background:var(--ok)" }, "✓"), "Use strong password", s.suggestion, (e) => void act(e, () => ask("menu-generate", { token })), "suggest"));
-      rows[rows.length - 1].querySelector(".sub")!.classList.add("secret");
+      const use = row(h("span", { class: "mono", style: "background:var(--ok)" }, "✓"), "Use strong password", s.suggestion, (e) => void act(e, () => ask("menu-generate", { token })), "suggest");
+      use.querySelector(".sub")!.classList.add("secret");
+      root.append(h("div", { class: "suggest-wrap" }, use, copyButton));
     }
     // The page asked for a passkey in its sign-in field: those first.
     for (const p of s.passkeys ?? []) {
@@ -163,6 +189,12 @@ document.addEventListener("keydown", (e) => {
       } else close();
     } else return;
     e.preventDefault();
+    return;
+  }
+  // Ctrl+C (or ⌘C) on the suggested password copies it.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && document.activeElement?.closest(".suggest-wrap")) {
+    e.preventDefault();
+    void copySuggestion(e);
     return;
   }
   const i = rows.indexOf(document.activeElement as HTMLButtonElement);
